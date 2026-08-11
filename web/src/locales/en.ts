@@ -2406,6 +2406,10 @@ Example: Virtual Hosted Style`,
       loading: 'Loading...',
       selectNode: 'Select a child node to view details',
       noDescription: 'No description',
+      description: 'Description',
+      keywords: 'Keywords',
+      entities: 'Entities',
+      graphContent: 'Full Graph Content',
       docCount: '{{count}} documents',
       deleteAllTitle: 'Delete navigation tree',
       deleteAllDescription:
@@ -2483,6 +2487,7 @@ Example: Virtual Hosted Style`,
       pleaseUploadAtLeastOneFile: 'Please upload at least one file',
     },
     flow: {
+      exportCurrentPage: 'Export current page',
       preprocess: {
         preprocess: 'Preprocess',
         mainContent: 'Main content',
