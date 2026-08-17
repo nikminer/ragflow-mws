@@ -648,7 +648,9 @@ def test_mws_chat_exposes_verified_tool_capability_without_extra_body():
     tool_chat = MWSChat("token", "qwen3-235b-instruct", PROJECT_URL)
     plain_chat = MWSChat("token", "qwen3-32b", PROJECT_URL)
 
-    assert tool_chat.is_tools is True
+    assert tool_chat.supports_tools is True
+    assert tool_chat.is_tools is False
+    assert plain_chat.supports_tools is False
     assert plain_chat.is_tools is False
     assert tool_chat._prepare_tool_request({"temperature": 0.2}) == (
         {"temperature": 0.2},
@@ -690,3 +692,27 @@ async def test_mws_tool_request_requires_a_structured_call():
     assert request["tools"] == chat.tools
     assert request["temperature"] == 0.2
     assert "extra_body" not in request
+
+
+@pytest.mark.p1
+@pytest.mark.asyncio
+async def test_mws_tool_request_omits_empty_tools_and_tool_choice():
+    """Never send the empty tools array rejected by strict MWS validation."""
+    chat = MWSChat("token", "qwen3-235b-instruct", PROJECT_URL)
+    chat.tool_choice = "required"
+    message = MagicMock(tool_calls=[], content="answer", reasoning_content=None, reasoning=None)
+    response = MagicMock(
+        choices=[MagicMock(message=message, finish_reason="stop")],
+        usage=MagicMock(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+    )
+    chat.async_client.chat.completions.create = AsyncMock(return_value=response)
+
+    await chat.async_chat_with_tools(
+        "Answer",
+        [{"role": "user", "content": "question"}],
+        {},
+    )
+
+    request = chat.async_client.chat.completions.create.call_args.kwargs
+    assert "tools" not in request
+    assert "tool_choice" not in request

@@ -1995,11 +1995,16 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     # stream its tokens straight to the client instead of relaying a tool
     # result through a second outer-LLM pass.
 
-    chat_mdl.bind_tools(None, rag_tools.tools)
+    tools_bound = chat_mdl.bind_tools(None, rag_tools.tools)
     # `rag` composes the full cited answer itself, so treat it as terminal: once
     # the model calls it, stream its result and stop — otherwise the model would
     # have to relay the (citation-bearing) answer through another round, which
     # small models mangle or drop, so the client receives nothing.
+    if not tools_bound:
+        logging.warning("rag_agent: failed to bind structured RAG tools; using standard RAG")
+        async for ans in async_chat(dialog, messages, stream, **kwargs):
+            yield ans
+        return
     if getattr(chat_mdl, "mdl", None) is not None:
         chat_mdl.mdl.terminal_tools = {"rag"}
         chat_mdl.mdl.tool_choice = "required"

@@ -110,8 +110,12 @@ class LLMBundle(LLM4Tenant):
     def bind_tools(self, toolcall_session, tools):
         if not self.is_tools:
             logging.warning("Model does not support tool call, but you have assigned one or more tools to it!")
-            return
+            return False
         self.mdl.bind_tools(toolcall_session, tools)
+        return self._has_bound_tools()
+
+    def _has_bound_tools(self):
+        return self.is_tools and getattr(self.mdl, "is_tools", False) and bool(getattr(self.mdl, "tools", None))
 
     def encode(self, texts: list):
         if self.langfuse:
@@ -431,7 +435,7 @@ class LLMBundle(LLM4Tenant):
         return queue
 
     async def async_chat(self, system: str, history: list, gen_conf: dict = {}, **kwargs):
-        if self.is_tools and hasattr(self.mdl, "async_chat_with_tools"):
+        if self._has_bound_tools() and hasattr(self.mdl, "async_chat_with_tools"):
             base_fn = self.mdl.async_chat_with_tools
         elif hasattr(self.mdl, "async_chat"):
             base_fn = self.mdl.async_chat
@@ -474,10 +478,8 @@ class LLMBundle(LLM4Tenant):
     async def async_chat_streamly(self, system: str, history: list, gen_conf: dict = {}, **kwargs):
         total_tokens = 0
         ans = ""
-        _bundle_is_tools = self.is_tools
-        _mdl_is_tools = getattr(self.mdl, "is_tools", False)
         _has_with_tools = hasattr(self.mdl, "async_chat_streamly_with_tools")
-        if _bundle_is_tools and _mdl_is_tools and _has_with_tools:
+        if self._has_bound_tools() and _has_with_tools:
             stream_fn = getattr(self.mdl, "async_chat_streamly_with_tools", None)
         elif hasattr(self.mdl, "async_chat_streamly"):
             stream_fn = getattr(self.mdl, "async_chat_streamly", None)
@@ -524,7 +526,7 @@ class LLMBundle(LLM4Tenant):
     async def async_chat_streamly_delta(self, system: str, history: list, gen_conf: dict = {}, **kwargs):
         total_tokens = 0
         ans = ""
-        if self.is_tools and getattr(self.mdl, "is_tools", False) and hasattr(self.mdl, "async_chat_streamly_with_tools"):
+        if self._has_bound_tools() and hasattr(self.mdl, "async_chat_streamly_with_tools"):
             stream_fn = getattr(self.mdl, "async_chat_streamly_with_tools", None)
         elif hasattr(self.mdl, "async_chat_streamly"):
             stream_fn = getattr(self.mdl, "async_chat_streamly", None)
