@@ -579,6 +579,7 @@ def test_mws_model_list_keeps_chat_embedding_and_rerank():
                 {"id": "bge-m3"},
                 {"id": "bge-reranker-v2-m3"},
                 {"id": "qwen3-32b"},
+                {"id": "qwen3-235b-instruct"},
                 {"id": "qwen-vl"},
             ]
         }
@@ -604,4 +605,88 @@ def test_mws_model_list_keeps_chat_embedding_and_rerank():
             "features": [],
             "max_tokens": 8192,
         },
+        {
+            "name": "qwen3-235b-instruct",
+            "model_types": ["chat"],
+            "features": ["is_tools"],
+            "max_tokens": 8192,
+        },
     ]
+
+
+@pytest.mark.p1
+def test_mws_model_list_uses_explicit_tool_calling_capability():
+    """Combine deployment metadata with the verified-model fallback."""
+    models = MWS("token", PROJECT_URL)._format_model_list(
+        {
+            "data": [
+                {"id": "custom-chat", "capabilities": {"tool_calling": True}},
+                {"id": "qwen3-235b-instruct", "capabilities": {"tool_calling": False}},
+            ]
+        }
+    )
+
+    assert models == [
+        {
+            "name": "custom-chat",
+            "model_types": ["chat"],
+            "features": ["is_tools"],
+            "max_tokens": 8192,
+        },
+        {
+            "name": "qwen3-235b-instruct",
+            "model_types": ["chat"],
+            "features": ["is_tools"],
+            "max_tokens": 8192,
+        },
+    ]
+
+
+@pytest.mark.p1
+def test_mws_chat_exposes_verified_tool_capability_without_extra_body():
+    """Keep existing MWS connections usable and avoid unsupported Qwen extras."""
+    tool_chat = MWSChat("token", "qwen3-235b-instruct", PROJECT_URL)
+    plain_chat = MWSChat("token", "qwen3-32b", PROJECT_URL)
+
+    assert tool_chat.is_tools is True
+    assert plain_chat.is_tools is False
+    assert tool_chat._prepare_tool_request({"temperature": 0.2}) == (
+        {"temperature": 0.2},
+        {},
+    )
+
+
+@pytest.mark.p1
+@pytest.mark.asyncio
+async def test_mws_tool_request_requires_a_structured_call():
+    """Forward the agent's required tool choice through the OpenAI-compatible API."""
+    chat = MWSChat("token", "qwen3-235b-instruct", PROJECT_URL)
+    chat.tool_choice = "required"
+    chat.tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "rag",
+                "description": "Retrieve evidence",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    message = MagicMock(tool_calls=[], content='rag("question")', reasoning_content=None, reasoning=None)
+    response = MagicMock(
+        choices=[MagicMock(message=message, finish_reason="stop")],
+        usage=MagicMock(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+    )
+    chat.async_client.chat.completions.create = AsyncMock(return_value=response)
+
+    await chat.async_chat_with_tools(
+        "Use retrieval",
+        [{"role": "user", "content": "question"}],
+        {"temperature": 0.2},
+    )
+
+    request = chat.async_client.chat.completions.create.call_args.kwargs
+    assert request["tool_choice"] == "required"
+    assert request["tools"] == chat.tools
+    assert request["temperature"] == 0.2
+    assert "extra_body" not in request

@@ -100,6 +100,7 @@ export function NextMessageInput({
   const [enableThinking, setEnableThinking] = useState(() =>
     storage.getThinkingLevel(),
   );
+  const enableThinkingRef = useRef(enableThinking);
   const [enableInternet, setEnableInternet] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -177,6 +178,7 @@ export function NextMessageInput({
   ];
 
   const handleThinkingChange = useCallback((value: string) => {
+    enableThinkingRef.current = value;
     setEnableThinking(value);
     storage.setThinkingLevel(value);
   }, []);
@@ -187,10 +189,10 @@ export function NextMessageInput({
 
   const pressEnter = useCallback(() => {
     onPressEnter({
-      enableThinking,
+      enableThinking: enableThinkingRef.current,
       enableInternet: showInternet ? enableInternet : false,
     });
-  }, [onPressEnter, enableThinking, enableInternet, showInternet]);
+  }, [onPressEnter, enableInternet, showInternet]);
 
   useEffect(() => {
     if (audioInputValue !== null) {

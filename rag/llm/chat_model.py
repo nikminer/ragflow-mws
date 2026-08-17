@@ -37,7 +37,7 @@ from common.llm_request_context import current_llm_user
 from common.token_utils import num_tokens_from_string, total_token_count_from_response, usage_from_response
 from rag.llm import FACTORY_DEFAULT_BASE_URL, LITELLM_PROVIDER_PREFIX, SupportedLiteLLMProvider
 from rag.llm.key_utils import _normalize_replicate_key
-from rag.llm.mws_utils import mws_api_url, require_mws_token
+from rag.llm.mws_utils import mws_api_url, mws_model_supports_tools, require_mws_token
 from rag.llm.tool_decorator import FunctionToolSession, is_tool
 from rag.nlp import is_chinese, is_english
 from rag.utils.url_utils import ensure_v1
@@ -236,6 +236,7 @@ class Base(ABC):
         self.max_rounds = kwargs.get("max_rounds", 5)
         self.is_tools = False
         self.tools = []
+        self.tool_choice = "auto"
         self.toolcall_sessions = {}
         # Token usage split (prompt/completion/total) of the most recent chat call.
         # Consumed by LLMBundle for accurate Langfuse reporting and run aggregation.
@@ -478,15 +479,18 @@ class Base(ABC):
         self.toolcall_session = toolcall_session
         self.tools = tools
 
-    async def async_chat_with_tools(self, system: str, history: list, gen_conf: dict | None = None):
-        gen_conf = dict(gen_conf or {})
-        gen_conf = self._clean_conf(gen_conf)
-        gen_conf, extra_request_kwargs = _apply_model_family_policies(
+    def _prepare_tool_request(self, gen_conf):
+        return _apply_model_family_policies(
             self.model_name,
             backend="base",
             gen_conf=gen_conf,
             request_kwargs={},
         )
+
+    async def async_chat_with_tools(self, system: str, history: list, gen_conf: dict | None = None):
+        gen_conf = dict(gen_conf or {})
+        gen_conf = self._clean_conf(gen_conf)
+        gen_conf, extra_request_kwargs = self._prepare_tool_request(gen_conf)
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
 
@@ -510,7 +514,7 @@ class Base(ABC):
             try:
                 for _ in range(self.max_rounds + 1):
                     logging.info(f"{self.tools=}")
-                    response = await self.async_client.chat.completions.create(model=self.model_name, messages=history, tools=self.tools, tool_choice="auto", **gen_conf, **extra_request_kwargs)
+                    response = await self.async_client.chat.completions.create(model=self.model_name, messages=history, tools=self.tools, tool_choice=self.tool_choice, **gen_conf, **extra_request_kwargs)
                     _add_round_usage(response)
                     if not response.choices or not response.choices[0].message:
                         raise Exception(f"500 response structure error. Response: {response}")
@@ -569,12 +573,7 @@ class Base(ABC):
     async def async_chat_streamly_with_tools(self, system: str, history: list, gen_conf: dict | None = None):
         gen_conf = dict(gen_conf or {})
         gen_conf = self._clean_conf(gen_conf)
-        gen_conf, extra_request_kwargs = _apply_model_family_policies(
-            self.model_name,
-            backend="base",
-            gen_conf=gen_conf,
-            request_kwargs={},
-        )
+        gen_conf, extra_request_kwargs = self._prepare_tool_request(gen_conf)
         tools = self.tools
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
@@ -605,7 +604,7 @@ class Base(ABC):
                     logging.info(f"[Tool loop] Deciding what to do next (step {_round + 1}); available tools: {', '.join(t['function']['name'] for t in tools)}")
 
                     response = await self.async_client.chat.completions.create(
-                        model=self.model_name, messages=history, stream=True, tools=tools, tool_choice="auto", **gen_conf, **extra_request_kwargs
+                        model=self.model_name, messages=history, stream=True, tools=tools, tool_choice=self.tool_choice, **gen_conf, **extra_request_kwargs
                     )
 
                     final_tool_calls = {}
@@ -716,7 +715,7 @@ class Base(ABC):
                     messages=history,
                     stream=True,
                     tools=tools,
-                    tool_choice="auto",
+                    tool_choice=self.tool_choice,
                     **gen_conf,
                     **extra_request_kwargs,
                 )
@@ -1091,6 +1090,11 @@ class MWSChat(Base):
             mws_api_url(base_url, "openai/v1"),
             **kwargs,
         )
+        self.is_tools = mws_model_supports_tools(self.model_name)
+
+    def _prepare_tool_request(self, gen_conf):
+        """MWS accepts the OpenAI tool fields without provider-specific extras."""
+        return dict(gen_conf or {}), {}
 
     def _clean_conf(self, gen_conf):
         """Keep only generation parameters documented by the MWS API."""
@@ -1815,6 +1819,7 @@ class LiteLLMBase(ABC):
         self.max_rounds = kwargs.get("max_rounds", 5)
         self.is_tools = False
         self.tools = []
+        self.tool_choice = "auto"
         self.toolcall_sessions = {}
         # Token usage split (prompt/completion/total) of the most recent chat call.
         # Consumed by LLMBundle for accurate Langfuse reporting and run aggregation.
@@ -2495,7 +2500,7 @@ class LiteLLMBase(ABC):
             completion_args.update(
                 {
                     "tools": self.tools,
-                    "tool_choice": "auto",
+                    "tool_choice": self.tool_choice,
                 }
             )
         if self.provider in FACTORY_DEFAULT_BASE_URL:

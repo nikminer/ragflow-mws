@@ -250,6 +250,7 @@ class RAGTools:
         # endpoint can forward the original deltas instead of that aggregate.
         self.answer_sink: Callable[[str, bool], None] | None = None
         self.tool_started_sink: Callable[[], None] | None = None
+        self.rag_completed = False
         # Citation pool shared with the final-answer node: the graph publishes
         # the chunks it actually used here (in the SAME order the answer's
         # ``[ID:n]`` markers index), so the caller can resolve references.
@@ -733,6 +734,7 @@ class RAGTools:
                         if cached_gram and _cache_similar(qk, cached_gram):
                             shared = len(qk[0] & cached_gram[0])
                             _LOG.info("[Agentic RAG] Cache hit — reused prior answer for near-identical question %r (%d shared words); skipped research.", question, shared)
+                            self.rag_completed = True
                             return cached_answer
 
             messages = [{"role": "user", "content": question}] if question else []
@@ -750,6 +752,7 @@ class RAGTools:
             if question and final and not self.text_attachments_content:
                 self._rag_cache[question] = (final, _question_keywords(question))
             call_stats.log()
+            self.rag_completed = True
             return final
 
     @tool

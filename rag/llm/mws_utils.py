@@ -18,6 +18,15 @@
 from urllib.parse import urlparse, urlunparse
 
 
+_TOOL_CAPABLE_MODELS = frozenset({"qwen3-235b-instruct"})
+
+
+def mws_model_supports_tools(model_name: str | None) -> bool:
+    """Return whether an MWS deployment has a verified tool-calling contract."""
+    normalized_name = (model_name or "").split("___", 1)[0].strip().lower()
+    return normalized_name in _TOOL_CAPABLE_MODELS
+
+
 def normalize_mws_project_url(base_url: str | None) -> str:
     """Validate and normalize an MWS GPT Model Hub project-root URL."""
     value = (base_url or "").strip().rstrip("/")

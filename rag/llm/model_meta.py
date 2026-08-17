@@ -24,7 +24,7 @@ from typing import ClassVar
 
 from common.aimlapi_utils import attribution_headers
 from common.constants import LLMType
-from rag.llm.mws_utils import mws_api_url, normalize_mws_project_url, require_mws_token
+from rag.llm.mws_utils import mws_api_url, mws_model_supports_tools, normalize_mws_project_url, require_mws_token
 
 
 class Base(ABC):
@@ -551,7 +551,28 @@ class MWS(OpenAIAPICompatible):
             LLMType.EMBEDDING.value,
             LLMType.RERANK.value,
         }
-        return [model for model in super()._format_model_list(raw_model_list) if len(model.get("model_types") or []) == 1 and model["model_types"][0] in supported_types]
+        raw_models = raw_model_list.get("data") if isinstance(raw_model_list, dict) else raw_model_list
+        raw_by_name = {
+            model.get("id") or model.get("name"): model
+            for model in raw_models or []
+            if isinstance(model, dict) and (model.get("id") or model.get("name"))
+        }
+        models = [
+            model
+            for model in super()._format_model_list(raw_model_list)
+            if len(model.get("model_types") or []) == 1 and model["model_types"][0] in supported_types
+        ]
+        for model in models:
+            raw_model = raw_by_name.get(model["name"], {})
+            capabilities = raw_model.get("capabilities")
+            if not isinstance(capabilities, dict):
+                status = raw_model.get("status")
+                capabilities = status.get("capabilities", {}) if isinstance(status, dict) else {}
+            explicit_tool_support = capabilities.get("tool_calling") if isinstance(capabilities, dict) else None
+            supports_tools = explicit_tool_support is True or mws_model_supports_tools(model["name"])
+            if supports_tools and model["model_types"] == [LLMType.CHAT.value]:
+                model["features"].append("is_tools")
+        return models
 
     async def get_model_list(self):
         """Discover MWS models while logging safe request and result metadata."""

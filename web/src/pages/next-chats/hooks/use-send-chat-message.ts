@@ -89,9 +89,8 @@ export const useSendMessage = () => {
   );
   const stopStream = useChatStreamStore((state) => state.stopStream);
 
-  // The regenerate button lives in the transcript, which has no access to the
-  // input box's thinking / internet toggles. Remember what the last send used
-  // so a retry keeps the same options instead of silently dropping them.
+  // Internet is not persisted, so remember it for regenerate. The current
+  // thinking level is resolved from storage when regenerate is clicked.
   const lastSendOptionsRef = useRef<NextMessageInputOnPressEnterParameter>({});
 
   const sendMessage = useCallback(

@@ -140,9 +140,8 @@ const ChatCard = forwardRef(function ChatCard(
 
   const llmId = useWatch({ control: form.control, name: 'llm_id' });
 
-  // Regenerate is triggered from the transcript, which has no access to the
-  // input box's thinking / internet toggles. Remember what the last send used so
-  // a retry keeps the same options instead of silently dropping them.
+  // Internet is not persisted, so remember it for regenerate. The current
+  // thinking level is resolved from storage when regenerate is clicked.
   const lastSendOptionsRef = useRef<NextMessageInputOnPressEnterParameter>({});
 
   // Regenerate within this card: reuse the card's own message state and

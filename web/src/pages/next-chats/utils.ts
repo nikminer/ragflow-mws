@@ -4,21 +4,19 @@ import { IConversation, IReference } from '@/interfaces/database/chat';
 import storage from '@/utils/authorization-util';
 
 /**
- * Regenerate is triggered from the transcript, which has no access to the input
- * box's thinking / internet toggles, so callers replay the options of their last
- * send. A view that hasn't sent anything yet has no record: fall back to the
- * input box's own defaults — it re-reads the persisted thinking level and starts
- * with internet off, so both stay in sync after a remount.
+ * Regenerate is triggered from the transcript, which has no direct access to
+ * the input box controls. Thinking is persisted whenever its selector changes,
+ * so read it at resend time; internet is not persisted and keeps the last send.
  */
 export function resolveResendOptions(
   lastSendOptions: NextMessageInputOnPressEnterParameter,
 ): NextMessageInputOnPressEnterParameter {
-  const {
-    enableThinking = storage.getThinkingLevel(),
-    enableInternet = false,
-  } = lastSendOptions;
+  const { enableInternet = false } = lastSendOptions;
 
-  return { enableThinking, enableInternet };
+  return {
+    enableThinking: storage.getThinkingLevel(),
+    enableInternet,
+  };
 }
 
 export const isConversationIdExist = (conversationId: string) => {

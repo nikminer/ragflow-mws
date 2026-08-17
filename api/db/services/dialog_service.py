@@ -1880,6 +1880,14 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             yield ans
         return
     kbs, embd_mdl, rerank_mdl, chat_mdl, tts_mdl = get_models(dialog)
+    if not chat_mdl.is_tools:
+        logging.warning(
+            "rag_agent: model %s does not support structured tool calls; using standard RAG",
+            chat_mdl.llm_name,
+        )
+        async for ans in async_chat(dialog, messages, stream, **kwargs):
+            yield ans
+        return
     model_type = chat_mdl.model_config["model_type"]
     factory = chat_mdl.model_config.get("llm_factory", "") if chat_mdl.model_config else ""
     text_attachments_content, image_attachments, image_files = get_files_content(messages[-1], model_type)
@@ -1994,6 +2002,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
     # small models mangle or drop, so the client receives nothing.
     if getattr(chat_mdl, "mdl", None) is not None:
         chat_mdl.mdl.terminal_tools = {"rag"}
+        chat_mdl.mdl.tool_choice = "required"
     if stream:
         # Surface the outer model's reasoning, agent progress logs, and the
         # final-answer model's reasoning as one continuous think block. The
@@ -2040,6 +2049,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
         think_closed = False
         outer_tool_started = False
         pending_outer_text = []
+        fallback_to_standard_rag = False
 
         async def _close_think_and_flush_answer():
             nonlocal answer_started, think_closed
@@ -2084,12 +2094,8 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                         yield {"answer": value, "reference": {}, "audio_binary": None, "final": False}
                     continue
                 if item[0] == "stream_done":
-                    if not outer_tool_started and pending_outer_text:
-                        async for output in _close_think_and_flush_answer():
-                            yield output
-                        for value in pending_outer_text:
-                            answer_deltas.append(value)
-                            yield {"answer": value, "reference": {}, "audio_binary": tts(tts_mdl, value), "final": False}
+                    if not outer_tool_started or not answer_deltas:
+                        fallback_to_standard_rag = True
                         pending_outer_text.clear()
                     break
                 _, kind, value, in_think = item
@@ -2116,7 +2122,10 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
                     value = re.sub(r"</?think>", "", value)
                     if value:
                         pending_outer_text.append(value)
-            if not think_closed:
+            if fallback_to_standard_rag and not think_closed:
+                yield {"answer": "", "reference": {}, "audio_binary": None, "final": False, "end_to_think": True}
+                think_closed = True
+            elif not think_closed:
                 async for output in _close_think_and_flush_answer():
                     yield output
         finally:
@@ -2130,6 +2139,12 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             except Exception:
                 logging.exception("rag_agent: drive task error")
 
+        if fallback_to_standard_rag:
+            logging.warning("rag_agent: no structured rag tool result; using standard RAG")
+            async for ans in async_chat(dialog, messages, True, **kwargs):
+                yield ans
+            return
+
         answer_text = "".join(answer_deltas)
         final = await decorate_answer(answer_text)
         final["final"] = True
@@ -2141,6 +2156,11 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             answer = await chat_mdl.async_chat(rag_tools.sys_prompt(), agent_messages, gen_conf)
         else:
             answer = await chat_mdl.async_chat(rag_tools.sys_prompt(), agent_messages, gen_conf, images=image_files)
+        if not rag_tools.rag_completed:
+            logging.warning("rag_agent: model returned no structured rag tool call; using standard RAG")
+            async for ans in async_chat(dialog, messages, False, **kwargs):
+                yield ans
+            return
         user_content = agent_messages[-1].get("content", "[content not available]")
         logging.debug("User: {}|Assistant: {}".format(user_content, answer))
         res = await decorate_answer(answer)
