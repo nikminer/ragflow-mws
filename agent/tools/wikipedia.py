@@ -155,6 +155,12 @@ class Wikipedia(ToolBase, ABC):
                 return
 
             try:
+                wikipedia.set_user_agent(
+                    os.environ.get(
+                        "WIKIPEDIA_USER_AGENT",
+                        "RAGFlowEngineeringAssistant/1.0 (contact: admin@example.local)",
+                    )
+                )
                 wikipedia.set_lang(self._param.language)
                 wiki_engine = wikipedia
                 pages = []
