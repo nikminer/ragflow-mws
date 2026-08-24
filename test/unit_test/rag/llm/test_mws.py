@@ -297,6 +297,73 @@ async def test_mws_chat_uses_exact_url_bearer_header_and_documented_fields():
 
 
 @pytest.mark.p1
+def test_mws_chat_request_preserves_openai_tool_history():
+    """Forward the native tool protocol used by the RAGFlow tool loop."""
+    chat = MWSChat("token", "qwen3-235b-instruct", PROJECT_URL)
+    tool_calls = [
+        {
+            "id": "call_123",
+            "type": "function",
+            "function": {
+                "name": "DuckDuckGo",
+                "arguments": '{"query":"Makise Kurisu"}',
+            },
+        }
+    ]
+
+    body = chat._request_body(
+        [
+            {"role": "system", "content": "Use tools when needed."},
+            {"role": "user", "content": "Who is Makise Kurisu?"},
+            {"role": "assistant", "content": None, "tool_calls": tool_calls},
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "Makise Kurisu is a fictional character.",
+            },
+            {"role": "user", "content": "Exceed max rounds: 1"},
+        ],
+        {"temperature": 0.2},
+        stream=False,
+    )
+
+    assert body == {
+        "model": "qwen3-235b-instruct",
+        "messages": [
+            {"role": "system", "content": "Use tools when needed."},
+            {"role": "user", "content": "Who is Makise Kurisu?"},
+            {"role": "assistant", "content": None, "tool_calls": tool_calls},
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "Makise Kurisu is a fictional character.",
+            },
+            {"role": "user", "content": "Exceed max rounds: 1"},
+        ],
+        "temperature": 0.2,
+    }
+
+
+@pytest.mark.p1
+@pytest.mark.parametrize(
+    ("history", "error"),
+    [
+        (["not-a-message"], "must be a dictionary"),
+        ([{"role": "developer", "content": "No"}], "Unsupported MWS chat role"),
+        ([{"role": "user", "content": None}], "user message content must be a string"),
+        ([{"role": "assistant", "content": None}], "assistant message content must be a string"),
+        ([{"role": "tool", "content": "result"}], "requires tool_call_id"),
+    ],
+)
+def test_mws_chat_request_rejects_invalid_message_shapes(history, error):
+    """Keep strict validation for messages outside the native tool protocol."""
+    chat = MWSChat("token", "qwen3-235b-instruct", PROJECT_URL)
+
+    with pytest.raises(ValueError, match=error):
+        chat._request_body(history, {}, stream=False)
+
+
+@pytest.mark.p1
 @pytest.mark.asyncio
 async def test_mws_chat_streaming_uses_documented_fields_and_usage():
     """Parse streaming MWS chat chunks and report final token usage."""
