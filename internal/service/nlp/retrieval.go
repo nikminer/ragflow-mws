@@ -61,6 +61,7 @@ type RetrievalRequest struct {
 	EmbeddingModel         *models.EmbeddingModel
 	Aggs                   *bool
 	Highlight              *bool
+	Filter                 map[string]interface{}
 }
 
 // RetrievalResult result from retrieval search
@@ -136,15 +137,17 @@ func (s *RetrievalService) Retrieval(ctx context.Context, req *RetrievalRequest)
 
 	// Execute search via Search()
 	searchReq := &RetrievalSearchRequest{
-		TenantIDs:      req.TenantIDs,
-		Question:       req.Question,
-		KbIDs:          req.KbIDs,
-		DocIDs:         req.DocIDs,
-		Page:           searchPage,
-		PageSize:       rerankLimit,
-		Top:            *req.Top,
-		RankFeature:    *req.RankFeature,
-		EmbeddingModel: req.EmbeddingModel,
+		TenantIDs:              req.TenantIDs,
+		Question:               req.Question,
+		KbIDs:                  req.KbIDs,
+		DocIDs:                 req.DocIDs,
+		Page:                   searchPage,
+		PageSize:               rerankLimit,
+		Top:                    *req.Top,
+		RankFeature:            *req.RankFeature,
+		EmbeddingModel:         req.EmbeddingModel,
+		VectorSimilarityWeight: req.VectorSimilarityWeight,
+		Filter:                 req.Filter,
 	}
 	searchResult, err := s.Search(ctx, searchReq)
 	if err != nil {
@@ -434,6 +437,7 @@ func (s *RetrievalService) countThresholdValidMatches(ctx context.Context, req *
 		Top:            *req.Top,
 		RankFeature:    *req.RankFeature,
 		EmbeddingModel: req.EmbeddingModel,
+		Filter:         req.Filter,
 	}
 	searchResult, err := s.Search(ctx, searchReq)
 	if err != nil {
@@ -543,19 +547,48 @@ func (s *RetrievalService) scoreSearchResult(ctx context.Context, req *Retrieval
 
 // RetrievalSearchRequest is the request struct for RetrievalService.Search()
 type RetrievalSearchRequest struct {
-	Question            string
-	TenantIDs           []string
-	KbIDs               []string
-	DocIDs              []string
-	Top                 int
-	Page                int
-	PageSize            int
-	Sort                bool
-	Highlight           *bool
-	SimilarityThreshold float64
-	RankFeature         map[string]float64
-	Filter              map[string]interface{}
-	EmbeddingModel      *models.EmbeddingModel
+	Question               string
+	TenantIDs              []string
+	KbIDs                  []string
+	DocIDs                 []string
+	Top                    int
+	Page                   int
+	PageSize               int
+	Sort                   bool
+	Highlight              *bool
+	SimilarityThreshold    float64
+	RankFeature            map[string]float64
+	Filter                 map[string]interface{}
+	EmbeddingModel         *models.EmbeddingModel
+	VectorSimilarityWeight *float64
+}
+
+func buildInfinityFusionExpr(topn int, vectorSimilarityWeight *float64) *types.FusionExpr {
+	vectorWeight := 0.3
+	if vectorSimilarityWeight != nil {
+		vectorWeight = *vectorSimilarityWeight
+	}
+	termWeight := math.Round((1.0-vectorWeight)*10000) / 10000
+
+	return &types.FusionExpr{
+		Method: "weighted_sum",
+		TopN:   topn,
+		FusionParams: map[string]interface{}{
+			"weights": fmt.Sprintf("%g,%g", termWeight, vectorWeight),
+		},
+	}
+}
+
+func buildRetrievalFusionExpr(docEngineType string, topn int, vectorSimilarityWeight *float64) *types.FusionExpr {
+	if docEngineType == string(engine.EngineInfinity) {
+		return buildInfinityFusionExpr(topn, vectorSimilarityWeight)
+	}
+
+	return &types.FusionExpr{
+		Method:       "weighted_sum",
+		TopN:         topn,
+		FusionParams: map[string]interface{}{"weights": "0.05,0.95"},
+	}
 }
 
 type RetrievalSearchResult struct {
@@ -668,11 +701,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 			}
 
 			// Execute search with fusion
-			fusionExpr := &types.FusionExpr{
-				Method:       "weighted_sum",
-				TopN:         topk,
-				FusionParams: map[string]interface{}{"weights": "0.05,0.95"},
-			}
+			fusionExpr := buildRetrievalFusionExpr(s.docEngine.GetType(), topk, req.VectorSimilarityWeight)
 
 			// Build source with vector column for ES
 			searchSrc := make([]string, len(searchRequest.SelectFields))
@@ -737,7 +766,7 @@ func (s *RetrievalService) Search(ctx context.Context, req *RetrievalSearchReque
 		for _, k := range keywords {
 			kwds[k] = struct{}{}
 			fgToken, _ := tokenizer.FineGrainedTokenize(k)
-			for _, kk := range strings.Fields(fgToken) {
+			for kk := range strings.FieldsSeq(fgToken) {
 				if len(kk) < 2 {
 					continue
 				}
@@ -1085,7 +1114,7 @@ func (s *RetrievalService) PruneDeletedChunks(ctx context.Context, result *Retri
 func buildIndexNames(tenantIDs []string) []string {
 	var indexNames []string
 	for _, tid := range tenantIDs {
-		for _, part := range strings.Split(tid, ",") {
+		for part := range strings.SplitSeq(tid, ",") {
 			part = strings.TrimSpace(part)
 			if part != "" {
 				indexNames = append(indexNames, fmt.Sprintf("ragflow_%s", part))
