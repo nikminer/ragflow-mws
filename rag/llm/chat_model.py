@@ -1088,7 +1088,7 @@ class MWSChat(Base):
     """MWS Chat Completions adapter with a documentation-only request body."""
 
     _FACTORY_NAME = "MWS"
-    _ROLES = {"system", "user", "assistant"}
+    _ROLES = {"system", "user", "assistant", "tool"}
 
     def __init__(self, key, model_name, base_url, **kwargs):
         """Initialize chat access for an MWS project and model deployment."""
@@ -1124,14 +1124,49 @@ class MWSChat(Base):
         return cleaned
 
     def _request_body(self, history, gen_conf, *, stream):
-        """Build a strict MWS chat request from RAGFlow messages and options."""
+        """Build an MWS chat request, including OpenAI tool-call history."""
         messages = []
         for message in history:
-            role = message.get("role") if isinstance(message, dict) else None
-            content = message.get("content") if isinstance(message, dict) else None
-            if role not in self._ROLES or not isinstance(content, str):
-                raise ValueError("MWS chat messages must contain only a system, user, or assistant role and string content")
-            messages.append({"role": role, "content": content})
+            if not isinstance(message, dict):
+                raise ValueError("MWS chat message must be a dictionary")
+
+            role = message.get("role")
+            if role not in self._ROLES:
+                raise ValueError(f"Unsupported MWS chat role: {role}")
+
+            content = message.get("content")
+            if role in {"system", "user"}:
+                if not isinstance(content, str):
+                    raise ValueError(f"MWS {role} message content must be a string")
+                messages.append({"role": role, "content": content})
+                continue
+
+            if role == "assistant":
+                tool_calls = message.get("tool_calls")
+                if tool_calls:
+                    messages.append(
+                        {
+                            "role": role,
+                            "content": content if isinstance(content, str) else None,
+                            "tool_calls": tool_calls,
+                        }
+                    )
+                    continue
+                if not isinstance(content, str):
+                    raise ValueError("MWS assistant message content must be a string")
+                messages.append({"role": role, "content": content})
+                continue
+
+            tool_call_id = message.get("tool_call_id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                raise ValueError("MWS tool message requires tool_call_id")
+            messages.append(
+                {
+                    "role": role,
+                    "tool_call_id": tool_call_id,
+                    "content": content if isinstance(content, str) else str(content),
+                }
+            )
         if not messages:
             raise ValueError("MWS chat messages are required")
 
