@@ -1030,6 +1030,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
 
     page = int(req.get("page", 1))
     size = int(req.get("size", 30))
+    rerank_candidates_count = int(req.get("rerank_candidates_count", 64))
     question = req.get("question", "")
     doc_ids = req.get("doc_ids", [])
     use_kg = req.get("use_kg", False)
@@ -1065,6 +1066,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
         similarity_threshold = float(search_config.get("similarity_threshold", similarity_threshold))
         vector_similarity_weight = float(search_config.get("vector_similarity_weight", vector_similarity_weight))
         top = max(1, min(int(search_config.get("top_k", top)), 2048))
+        rerank_candidates_count = int(search_config.get("rerank_candidates_count", 100))
         use_kg = search_config.get("use_kg", use_kg)
         langs = search_config.get("cross_languages", langs)
         logging.debug(
@@ -1144,6 +1146,7 @@ async def search(dataset_id: str, tenant_id: str, req: dict):
         rerank_mdl=rerank_mdl,
         rank_feature=labels,
         trace_id=search_id,
+        rerank_candidates_count=rerank_candidates_count,
     )
 
     if use_kg:
@@ -1410,6 +1413,7 @@ async def search_datasets(tenant_id: str, req: dict):
     kb_ids = req.get("dataset_ids", [])
     page = int(req.get("page", 1))
     size = int(req.get("size", 30))
+    rerank_candidates_count = int(req.get("rerank_candidates_count", 64))
     question = req.get("question", "")
     doc_ids = req.get("doc_ids", [])
     use_kg = req.get("use_kg", False)
@@ -1457,6 +1461,7 @@ async def search_datasets(tenant_id: str, req: dict):
         similarity_threshold = float(search_config.get("similarity_threshold", similarity_threshold))
         vector_similarity_weight = float(search_config.get("vector_similarity_weight", vector_similarity_weight))
         top = max(1, min(int(search_config.get("top_k", top)), 2048))
+        rerank_candidates_count = int(search_config.get("rerank_candidates_count", 100))
         use_kg = search_config.get("use_kg", use_kg)
         langs = search_config.get("cross_languages", langs)
         logging.debug(
@@ -1541,6 +1546,7 @@ async def search_datasets(tenant_id: str, req: dict):
         rank_feature=labels,
         trace_id=search_id,
         must_not=None if req.get("include_knowledge_compilation", True) else {"exists": "compile_kwd"},
+        rerank_candidates_count=rerank_candidates_count,
     )
 
     if use_kg:
@@ -2647,46 +2653,13 @@ async def list_wiki_topics(
     if not counts:
         return True, {"total": 0, "items": []}
 
-    # Resolve display metadata (title/slug) from the topic landing pages; fall
-    # back to the raw topic name when a topic has no ``page_type="topic"`` row.
-    meta: dict[str, dict] = {}
-    try:
-        meta_fields = ["topic_kwd", "title_kwd", "slug_kwd"]
-        _BATCH = 1000
-        _offset = 0
-        while True:
-            meta_res = settings.docStoreConn.search(
-                select_fields=meta_fields,
-                highlight_fields=[],
-                condition={"compile_kwd": [WIKI_PAGE_COMPILE_KWD], "page_type_kwd": ["topic"]},
-                match_expressions=[],
-                order_by=OrderByExpr(),
-                offset=_offset,
-                limit=_BATCH,
-                index_names=index_nm,
-                knowledgebase_ids=[dataset_id],
-            )
-            rows = settings.docStoreConn.get_fields(meta_res, meta_fields) or {}
-            if not rows:
-                break
-            for row in rows.values():
-                t = _scalar(row.get("topic_kwd"))
-                if t:
-                    meta[t] = {
-                        "title": _scalar(row.get("title_kwd")) or t,
-                        "slug": _scalar(row.get("slug_kwd")) or t,
-                    }
-            _offset += _BATCH
-    except Exception:
-        logging.exception("list_wiki_topics: topic metadata lookup failed for kb=%s", dataset_id)
-
     # Rank topics by page count (descending), then title for a stable order.
     ranked = sorted(
         (
             {
                 "topic": t,
-                "title": (meta.get(t) or {}).get("title") or t,
-                "slug": (meta.get(t) or {}).get("slug") or t,
+                "title": t.rsplit("/", 1)[-1],
+                "slug": t,
                 "page_count": c,
             }
             for t, c in counts.items()
