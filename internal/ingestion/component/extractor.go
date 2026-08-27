@@ -607,7 +607,14 @@ func (c *ExtractorComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map
 	}
 
 	if err := runtime.WithTimeout(ctx, extractorTimeout, func(timeoutCtx context.Context) error {
-		// Tag phase: run when tags.top_n > 0 and we have chunks.
+		// Phase 1: Keywords extraction (if enabled), running across chunks via extractorPool.
+		if c.Param.Keywords.TopN > 0 {
+			if err := c.runAutoKeywordsPool(timeoutCtx, db, in); err != nil {
+				return err
+			}
+		}
+
+		// Phase 2: Tag phase (if enabled), benefiting from title and freshly extracted keywords.
 		if c.Param.Tags.TopN > 0 {
 			tagged, tagErr := c.runAutoTags(timeoutCtx, db, in)
 			if tagErr != nil {
@@ -616,7 +623,8 @@ func (c *ExtractorComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map
 			in.chunks = tagged
 		}
 
-		return c.runAutoExtractions(timeoutCtx, db, in)
+		// Phase 3: Remaining extractions (Questions, Summary, Metadata) via extractorPool.
+		return c.runRemainingExtractions(timeoutCtx, db, in)
 	}); err != nil {
 		return nil, fmt.Errorf("extractor: %w", err)
 	}
@@ -628,6 +636,40 @@ func (c *ExtractorComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map
 		"chunks":        in.chunks,
 		"output_format": "chunks",
 	}, nil
+}
+
+// extractorLLMCacheKey builds a Redis key for textual extractions.
+func extractorLLMCacheKey(taskType, modelID, systemPrompt, text string) string {
+	h := xxhash.New()
+	h.WriteString(taskType)
+	h.WriteString("\x00")
+	h.WriteString(modelID)
+	h.WriteString("\x00")
+	h.WriteString(systemPrompt)
+	h.WriteString("\x00")
+	h.WriteString(text)
+	return fmt.Sprintf("kc:extractor:%s:%x", taskType, h.Sum64())
+}
+
+// callTextCached wraps callText with a 24-hour Redis cache.
+func (c *ExtractorComponent) callTextCached(ctx context.Context, db *gorm.DB, in extractorInputs, taskType, systemPrompt, chunkText string) (string, error) {
+	key := extractorLLMCacheKey(taskType, in.llmID, systemPrompt, chunkText)
+	if client := redis.Get(); client != nil {
+		if data, err := client.Get(ctx, key); err == nil && data != "" {
+			return data, nil
+		}
+	}
+	res, err := c.callText(ctx, db, in, systemPrompt, chunkText)
+	if err != nil {
+		return "", err
+	}
+	res = cleanExtractionResult(res)
+	if res != "" && !strings.Contains(res, "**ERROR**") {
+		if client := redis.Get(); client != nil {
+			client.Set(ctx, key, res, 24*time.Hour)
+		}
+	}
+	return res, nil
 }
 
 // runAutoKeywords extracts keywords for the current chunk and stores
@@ -651,11 +693,10 @@ func (c *ExtractorComponent) runAutoKeywords(ctx context.Context, db *gorm.DB, i
 		llmID:       in.llmID,
 		temperature: &kwTemp,
 	}
-	resultStr, err := c.callText(ctx, db, kwIn, systemPrompt, chunkText)
+	resultStr, err := c.callTextCached(ctx, db, kwIn, "keywords", systemPrompt, chunkText)
 	if err != nil {
 		return err
 	}
-	resultStr = cleanExtractionResult(resultStr)
 	if resultStr == "" {
 		return nil
 	}
@@ -692,11 +733,10 @@ func (c *ExtractorComponent) runAutoQuestions(ctx context.Context, db *gorm.DB, 
 		llmID:       in.llmID,
 		temperature: &qTemp,
 	}
-	resultStr, err := c.callText(ctx, db, qIn, systemPrompt, chunkText)
+	resultStr, err := c.callTextCached(ctx, db, qIn, "questions", systemPrompt, chunkText)
 	if err != nil {
 		return err
 	}
-	resultStr = cleanExtractionResult(resultStr)
 	if resultStr == "" {
 		return nil
 	}
@@ -739,11 +779,10 @@ func (c *ExtractorComponent) runAutoSummary(ctx context.Context, db *gorm.DB, in
 		llmID:       in.llmID,
 		temperature: &sumTemp,
 	}
-	resultStr, err := c.callText(ctx, db, sumIn, systemPrompt, chunkText)
+	resultStr, err := c.callTextCached(ctx, db, sumIn, "summary", systemPrompt, chunkText)
 	if err != nil {
 		return err
 	}
-	resultStr = cleanExtractionResult(resultStr)
 	if resultStr == "" {
 		return nil
 	}
@@ -751,15 +790,10 @@ func (c *ExtractorComponent) runAutoSummary(ctx context.Context, db *gorm.DB, in
 	return nil
 }
 
-// runAutoExtractions dispatches the auto keyword / question / summary / metadata
-// extraction for every chunk to the process-wide extractorPool so the
-// work runs with bounded cross-chunk concurrency (mirrors Python's
-// chat_limiter). The pool only bounds concurrency; per-invocation
-// completion and first-error collection happen here with a local
-// sync.WaitGroup, so concurrent Invoke calls do not disturb each other.
-// Each chunk job owns its own chunk map, so no per-chunk mutex is needed.
-func (c *ExtractorComponent) runAutoExtractions(ctx context.Context, db *gorm.DB, in extractorInputs) error {
-	if c.Param.Keywords.TopN <= 0 && c.Param.Questions.TopN <= 0 && !c.Param.Summary.Enabled && !c.Param.Metadata.Enabled {
+// runAutoKeywordsPool dispatches keyword extraction across all chunks concurrently
+// using extractorPool before the tagging stage.
+func (c *ExtractorComponent) runAutoKeywordsPool(ctx context.Context, db *gorm.DB, in extractorInputs) error {
+	if c.Param.Keywords.TopN <= 0 || len(in.chunks) == 0 {
 		return nil
 	}
 	futs := make([]utility.WorkerPoolFuture[extractorJob, struct{}], 0, len(in.chunks))
@@ -769,13 +803,66 @@ func (c *ExtractorComponent) runAutoExtractions(ctx context.Context, db *gorm.DB
 		if strings.TrimSpace(text) == "" {
 			text, _ = ck["text"].(string)
 		}
-		fn := c.autoExtractionJob(ctx, db, in, i, ck, text)
+		fn := func() error {
+			if err := c.runAutoKeywords(ctx, db, in, ck, text); err != nil {
+				return fmt.Errorf("chunk %d keywords: %w", i, err)
+			}
+			return nil
+		}
 		f, err := extractorPool.Submit(ctx, fn)
 		if err != nil {
 			return err
 		}
 		futs = append(futs, f)
 	}
+	return awaitFutures(ctx, futs)
+}
+
+// runRemainingExtractions dispatches auto questions / summary / metadata
+// extractions across all chunks concurrently using extractorPool.
+func (c *ExtractorComponent) runRemainingExtractions(ctx context.Context, db *gorm.DB, in extractorInputs) error {
+	if c.Param.Questions.TopN <= 0 && !c.Param.Summary.Enabled && !c.Param.Metadata.Enabled {
+		return nil
+	}
+	futs := make([]utility.WorkerPoolFuture[extractorJob, struct{}], 0, len(in.chunks))
+	for i, ck := range in.chunks {
+		i, ck := i, ck
+		text, _ := ck["content_with_weight"].(string)
+		if strings.TrimSpace(text) == "" {
+			text, _ = ck["text"].(string)
+		}
+		fn := c.remainingExtractionJob(ctx, db, in, i, ck, text)
+		f, err := extractorPool.Submit(ctx, fn)
+		if err != nil {
+			return err
+		}
+		futs = append(futs, f)
+	}
+	return awaitFutures(ctx, futs)
+}
+
+func (c *ExtractorComponent) remainingExtractionJob(ctx context.Context, db *gorm.DB, in extractorInputs, idx int, ck map[string]any, chunkText string) extractorJob {
+	return func() error {
+		if c.Param.Questions.TopN > 0 {
+			if err := c.runAutoQuestions(ctx, db, in, ck, chunkText); err != nil {
+				return fmt.Errorf("chunk %d questions: %w", idx, err)
+			}
+		}
+		if c.Param.Summary.Enabled {
+			if err := c.runAutoSummary(ctx, db, in, ck, chunkText); err != nil {
+				return fmt.Errorf("chunk %d summary: %w", idx, err)
+			}
+		}
+		if c.Param.Metadata.Enabled {
+			if err := c.runEnableMetadata(ctx, db, in, ck, chunkText); err != nil {
+				return fmt.Errorf("chunk %d metadata: %w", idx, err)
+			}
+		}
+		return nil
+	}
+}
+
+func awaitFutures(ctx context.Context, futs []utility.WorkerPoolFuture[extractorJob, struct{}]) error {
 	var firstErr error
 	var emu sync.Mutex
 	var wg sync.WaitGroup
@@ -803,37 +890,6 @@ func (c *ExtractorComponent) runAutoExtractions(ctx context.Context, db *gorm.DB
 	}
 	wg.Wait()
 	return firstErr
-}
-
-// autoExtractionJob returns the unit of work for one chunk: it runs the
-// enabled auto-extractions (keywords, questions, summary, metadata) sequentially
-// on the chunk's own map. Running them sequentially inside the job keeps
-// the code free of per-chunk mutexes — cross-chunk parallelism is provided
-// by the pool, not by intra-chunk goroutines.
-func (c *ExtractorComponent) autoExtractionJob(ctx context.Context, db *gorm.DB, in extractorInputs, idx int, ck map[string]any, chunkText string) extractorJob {
-	return func() error {
-		if c.Param.Keywords.TopN > 0 {
-			if err := c.runAutoKeywords(ctx, db, in, ck, chunkText); err != nil {
-				return fmt.Errorf("chunk %d keywords: %w", idx, err)
-			}
-		}
-		if c.Param.Questions.TopN > 0 {
-			if err := c.runAutoQuestions(ctx, db, in, ck, chunkText); err != nil {
-				return fmt.Errorf("chunk %d questions: %w", idx, err)
-			}
-		}
-		if c.Param.Summary.Enabled {
-			if err := c.runAutoSummary(ctx, db, in, ck, chunkText); err != nil {
-				return fmt.Errorf("chunk %d summary: %w", idx, err)
-			}
-		}
-		if c.Param.Metadata.Enabled {
-			if err := c.runEnableMetadata(ctx, db, in, ck, chunkText); err != nil {
-				return fmt.Errorf("chunk %d metadata: %w", idx, err)
-			}
-		}
-		return nil
-	}
 }
 
 // runEnableMetadata extracts structured metadata for the current chunk and
