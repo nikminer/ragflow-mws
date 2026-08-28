@@ -23,7 +23,6 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from functools import partial
 from typing import Any, Tuple, Union
 
@@ -35,10 +34,10 @@ from api.db.services.file_service import FileService
 from api.db.services.llm_service import LLMBundle
 from api.db.services.task_service import has_canceled
 from common.constants import LLMType
-from common.llm_request_context import set_llm_request_context, reset_llm_request_context
 from common.exceptions import TaskCanceledException
+from common.llm_request_context import reset_llm_request_context, set_llm_request_context
 from common.misc_utils import get_uuid, hash_str2int
-from common.token_utils import token_usage_sink, langfuse_run_attrs
+from common.token_utils import langfuse_run_attrs, token_usage_sink
 from rag.prompts.generator import chunks_format
 from rag.utils.redis_conn import REDIS_CONN
 from rag.utils.tts_cache import synthesize_with_cache
@@ -130,11 +129,7 @@ class Graph:
         for k in self.dsl.keys():
             if k in ["components"]:
                 continue
-            try:
-                dsl[k] = deepcopy(self.dsl[k])
-            except Exception as e:
-                logging.warning("Graph.__str__: deepcopy failed for dsl key '%s' (type=%s): %s. Using shallow reference.", k, type(self.dsl[k]).__name__, e)
-                dsl[k] = self.dsl[k]
+            dsl[k] = self.dsl[k]
 
         for k, cpn in self.components.items():
             if k not in dsl["components"]:
@@ -143,11 +138,7 @@ class Graph:
                 if c == "obj":
                     dsl["components"][k][c] = json.loads(str(cpn["obj"]))
                     continue
-                try:
-                    dsl["components"][k][c] = deepcopy(cpn[c])
-                except Exception as e:
-                    logging.warning("Graph.__str__: deepcopy failed for component '%s' key '%s' (type=%s): %s. Using shallow reference.", k, c, type(cpn[c]).__name__, e)
-                    dsl["components"][k][c] = cpn[c]
+                dsl["components"][k][c] = cpn[c]
 
         def _serialize_default(obj):
             if callable(obj):
