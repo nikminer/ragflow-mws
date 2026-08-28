@@ -87,6 +87,7 @@ const SetupSchema = z
     enable_multi_column: z.boolean().optional(),
     remove_toc: z.boolean().optional(),
     remove_header_footer: z.boolean().optional(),
+    extract_automatic_numbering: z.boolean().optional(),
     pages: z
       .array(
         z
@@ -268,7 +269,7 @@ const ParserForm = ({
       table_result_type: '',
       markdown_image_response_type: '',
       remove_header_footer: false,
-      extract_automatic_numbering: true,
+      extract_automatic_numbering: false,
       // preprocess: [],
     });
   }, [append]);
