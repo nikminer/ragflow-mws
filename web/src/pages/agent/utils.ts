@@ -290,6 +290,7 @@ export function transformParserParams(params: ParserFormSchemaType) {
             ...filteredSetup,
             vlm: { llm_id: cur.vlm?.llm_id },
             flatten_media_to_text: cur.flatten_media_to_text,
+            remove_toc: cur.remove_toc,
             remove_header_footer: cur.remove_header_footer || false,
           };
           break;
@@ -298,8 +299,7 @@ export function transformParserParams(params: ParserFormSchemaType) {
             ...filteredSetup,
             vlm: { llm_id: cur.vlm?.llm_id },
             flatten_media_to_text: cur.flatten_media_to_text,
-            extract_automatic_numbering:
-              cur.extract_automatic_numbering ?? true,
+            remove_toc: cur.remove_toc,
             remove_header_footer: cur.remove_header_footer || false,
           };
           break;
@@ -315,6 +315,7 @@ export function transformParserParams(params: ParserFormSchemaType) {
             ...filteredSetup,
             vlm: { llm_id: cur.vlm?.llm_id },
             flatten_media_to_text: cur.flatten_media_to_text,
+            remove_toc: cur.remove_toc,
           };
           break;
         case FileType.Video:
