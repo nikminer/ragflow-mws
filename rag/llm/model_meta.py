@@ -1084,7 +1084,7 @@ class HuggingFace(Base):
         if isinstance(model_type, dict):
             if "embedding" in model_type:
                 return [LLMType.EMBEDDING.value]
-            if "rerank" in model_type:
+            if "reranker" in model_type:
                 return [LLMType.RERANK.value]
             return []
         # TGI format: "text-generation" / "text2text-generation"
@@ -1147,6 +1147,10 @@ class GPUStack(OpenAIAPICompatible):
 
 class LMStudio(OpenAIAPICompatible):
     _FACTORY_NAME = "LM-Studio"
+
+
+class Llmman(OpenAIAPICompatible):
+    _FACTORY_NAME = "llmman"
 
 
 class NewAPI(OpenAIAPICompatible):
