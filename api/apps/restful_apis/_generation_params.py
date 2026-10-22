@@ -16,13 +16,14 @@
 
 from copy import deepcopy
 
-GENERATION_CONFIG_KEYS = ("temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens")
+GENERATION_CONFIG_KEYS = ("temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens", "reasoning_effort")
 GENERATION_CONFIG_ENABLED_KEYS = {
     "temperature": ("temperatureEnabled", "temperature_enabled"),
     "top_p": ("topPEnabled", "top_p_enabled"),
     "frequency_penalty": ("frequencyPenaltyEnabled", "frequency_penalty_enabled"),
     "presence_penalty": ("presencePenaltyEnabled", "presence_penalty_enabled"),
     "max_tokens": ("maxTokensEnabled", "max_tokens_enabled"),
+    "reasoning_effort": (),
 }
 
 

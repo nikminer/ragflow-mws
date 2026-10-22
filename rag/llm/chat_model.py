@@ -643,6 +643,14 @@ class Base(ABC):
     def _tool_request_messages(self, history: list) -> list:
         return history
 
+    def _prepare_tool_request(self, gen_conf, *, stream=False):
+        return _apply_model_family_policies(
+            self.model_name,
+            backend="base",
+            gen_conf=gen_conf,
+            request_kwargs={},
+        )
+
     async def async_chat_with_tools(self, system: str, history: list, gen_conf: dict | None = None):
         gen_conf = dict(gen_conf or {})
         gen_conf.pop("tools", None)
@@ -651,12 +659,7 @@ class Base(ABC):
             return await self.async_chat(system, history, gen_conf)
 
         gen_conf = self._clean_conf(gen_conf)
-        gen_conf, extra_request_kwargs = _apply_model_family_policies(
-            self.model_name,
-            backend="base",
-            gen_conf=gen_conf,
-            request_kwargs={},
-        )
+        gen_conf, extra_request_kwargs = self._prepare_tool_request(gen_conf)
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
 
@@ -777,12 +780,7 @@ class Base(ABC):
             return
 
         gen_conf = self._clean_conf(gen_conf)
-        gen_conf, extra_request_kwargs = _apply_model_family_policies(
-            self.model_name,
-            backend="base",
-            gen_conf=gen_conf,
-            request_kwargs={},
-        )
+        gen_conf, extra_request_kwargs = self._prepare_tool_request(gen_conf, stream=True)
         gen_conf.pop("tools", None)
         gen_conf.pop("tool_choice", None)
         tools = self.tools
@@ -1364,7 +1362,18 @@ class MWSChat(Base):
             max_tokens = gen_conf.get("max_tokens")
         if max_tokens is not None:
             cleaned["max_completion_tokens"] = max_tokens
+        effort = gen_conf.get("reasoning_effort")
+        if effort is not None and effort != "default":
+            if not isinstance(effort, str) or effort not in {"none", "minimal", "low", "medium", "high", "max"}:
+                raise ValueError("Invalid MWS reasoning_effort; expected none, minimal, low, medium, high, or max")
+            cleaned["reasoning_effort"] = effort
         return cleaned
+
+    def _prepare_tool_request(self, gen_conf, *, stream=False):
+        # MWS defines its own controls; deployment names must not trigger
+        # transport policies for another provider (for example Qwen extras).
+        extra = {"stream_options": {"include_usage": True}} if stream else {}
+        return self._clean_conf(gen_conf), extra
 
     def _request_body(self, history, gen_conf, *, stream):
         """Build an MWS request and flatten unsupported tool-history messages."""
@@ -1469,27 +1478,29 @@ class MWSChat(Base):
         choice = choices[0]
         message = choice.get("message") if isinstance(choice, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str):
+        reasoning = (message.get("reasoning_content") or message.get("reasoning")) if isinstance(message, dict) else None
+        if not isinstance(content, str) and not isinstance(reasoning, str):
             raise ValueError("MWS chat response does not contain message content")
-        answer = content.strip()
+        answer = (content or "").strip()
+        if kwargs.get("with_reasoning", True) and isinstance(reasoning, str) and reasoning:
+            answer = f"<think>{reasoning}</think>{answer}"
         if choice.get("finish_reason") == "length":
             answer = self._length_stop(answer)
         return answer, total_token_count_from_response(payload)
 
     async def _async_chat_streamly(self, history, gen_conf, **kwargs):
-        """Yield MWS SSE content chunks and attach usage to the final chunk."""
+        """Stream reasoning and answer deltas, then report final token usage."""
         body = self._request_body(history, gen_conf, stream=True)
         timeout = aiohttp.ClientTimeout(total=int(os.environ.get("LLM_TIMEOUT_SECONDS", 600)))
-        pending_content = None
         estimated_tokens = 0
-        reported_tokens = 0
+        reported_tokens = None
+        in_reasoning = False
+        finished = False
+        generated_text = ""
+        answer = ""
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                self.chat_url,
-                headers=self.headers,
-                json=body,
-            ) as response:
+            async with session.post(self.chat_url, headers=self.headers, json=body) as response:
                 if response.status != 200:
                     raise RuntimeError(f"MWS chat request failed with status {response.status}: {await response.text()}")
 
@@ -1498,30 +1509,59 @@ class MWSChat(Base):
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].strip()
+                    if not data:
+                        continue
                     if data == "[DONE]":
+                        finished = True
                         break
                     event = json.loads(data)
-                    usage = usage_from_response(event)
-                    if usage["total_tokens"]:
-                        self.last_usage = usage
-                        reported_tokens = usage["total_tokens"]
-
+                    if event.get("error"):
+                        if in_reasoning:
+                            in_reasoning = False
+                            yield "</think>", 0
+                        raise RuntimeError(f"MWS chat stream failed: {event['error']}")
+                    if isinstance(event.get("usage"), dict):
+                        self.last_usage = usage_from_response(event)
+                        reported_tokens = self.last_usage["total_tokens"]
                     choices = event.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
                     choice = choices[0]
-                    delta = choice.get("delta") if isinstance(choice, dict) else None
-                    content = delta.get("content") if isinstance(delta, dict) else None
-                    if not isinstance(content, str) or not content:
+                    if not isinstance(choice, dict):
                         continue
-                    if choice.get("finish_reason") == "length":
-                        content = self._length_stop(content)
-                    if pending_content is not None:
-                        yield pending_content, 0
-                    pending_content = content
-                    estimated_tokens += num_tokens_from_string(content)
+                    delta = choice.get("delta") or {}
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if isinstance(reasoning, str) and reasoning:
+                        generated_text += reasoning
+                        estimated_tokens += num_tokens_from_string(reasoning)
+                        if kwargs.get("with_reasoning", True):
+                            if not in_reasoning:
+                                in_reasoning = True
+                                yield "<think>", 0
+                            yield reasoning, 0
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        if in_reasoning:
+                            in_reasoning = False
+                            yield "</think>", 0
+                        answer += content
+                        generated_text += content
+                        estimated_tokens += num_tokens_from_string(content)
+                        yield content, 0
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason:
+                        finished = True
+                        if in_reasoning:
+                            in_reasoning = False
+                            yield "</think>", 0
+                        if finish_reason == "length":
+                            yield LENGTH_NOTIFICATION_CN if is_chinese(answer or generated_text) else LENGTH_NOTIFICATION_EN, 0
 
-        yield pending_content or "", reported_tokens or estimated_tokens
+        if in_reasoning:
+            yield "</think>", 0
+        if not finished:
+            raise RuntimeError("MWS chat stream ended before [DONE] or finish_reason")
+        yield "", reported_tokens if reported_tokens is not None else estimated_tokens
 
 
 class Xiaomi(Base):

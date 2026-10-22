@@ -443,6 +443,7 @@ export const LlmSettingParamKeys = [
   'max_tokens',
   'parameter',
   'thinking',
+  'reasoning_effort',
   'temperatureEnabled',
   'topPEnabled',
   'presencePenaltyEnabled',

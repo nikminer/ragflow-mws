@@ -55,6 +55,7 @@ class LLMParam(ComponentParamBase):
         self.output_structure = None
         self.cite = True
         self.visual_files_var = None
+        self.reasoning_effort = None
 
     def check(self):
         self.check_decimal_float(float(self.temperature), "[Agent] Temperature")
@@ -90,6 +91,8 @@ class LLMParam(ComponentParamBase):
             conf["frequency_penalty"] = float(self.frequency_penalty)
         if hasattr(self, "thinking") and self.thinking and self.thinking != "default":
             conf["thinking"] = self.thinking
+        if self.reasoning_effort and self.reasoning_effort != "default":
+            conf["reasoning_effort"] = self.reasoning_effort
         return conf
 
 

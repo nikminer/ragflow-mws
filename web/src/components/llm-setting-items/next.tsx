@@ -18,6 +18,7 @@ import {
   ModelVariableType,
   settledModelVariableMap,
 } from '@/constants/knowledge';
+import { ReasoningEffortValues } from '@/constants/reasoning';
 import { useTranslate } from '@/hooks/common-hooks';
 import { camelCase, isEqual } from 'lodash';
 import { useCallback } from 'react';
@@ -39,6 +40,7 @@ import {
   SelectValue,
 } from '../ui/select';
 import { LLMFormField } from './llm-form-field';
+import { ModelReasoningFormField } from './model-reasoning-form-field';
 import { SliderInputSwitchFormField } from './slider';
 import { useHandleFreedomChange } from './use-watch-change';
 
@@ -83,6 +85,7 @@ export const LlmSettingFieldSchema = {
   max_tokens: z.number().optional(),
   parameter: z.string().optional(),
   thinking: z.enum(['default', 'enabled', 'disabled']).optional(),
+  reasoning_effort: z.enum(ReasoningEffortValues).optional(),
 };
 
 export const LlmSettingSchema = {
@@ -262,38 +265,10 @@ export function LlmSettingFieldItems({
         ></SliderInputSwitchFormField>
       )}
       {showFields.some((item) => item === 'thinking') && (
-        <FormField
-          control={form.control}
-          name={getFieldWithPrefix('thinking')}
-          render={({ field }) => (
-            <FormItem className="flex justify-between items-center">
-              <FormLabel className="flex-1" tooltip={t('thinkingTip')}>
-                {t('thinkingMode')}
-              </FormLabel>
-              <FormControl>
-                <Select
-                  value={field.value ?? 'default'}
-                  onValueChange={field.onChange}
-                >
-                  <SelectTrigger className="flex-1 !m-0">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">
-                      {t('thinkingDefault')}
-                    </SelectItem>
-                    <SelectItem value="enabled">
-                      {t('thinkingEnabled')}
-                    </SelectItem>
-                    <SelectItem value="disabled">
-                      {t('thinkingDisabled')}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
+        <ModelReasoningFormField
+          prefix={prefix}
+          modelFieldName={llmId ?? getFieldWithPrefix('llm_id')}
+          ownerTenantId={ownerTenantId}
         />
       )}
     </section>

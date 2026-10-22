@@ -579,7 +579,7 @@ async def test_mws_chat_streaming_uses_documented_fields_and_usage():
             )
         ]
 
-    assert chunks == [("Hel", 0), ("lo", 5)]
+    assert chunks == [("Hel", 0), ("lo", 0), ("", 5)]
     assert chat.last_usage == {
         "prompt_tokens": 4,
         "completion_tokens": 1,

@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from '@/constants/reasoning';
 import { MessageType, WebSearchProvider } from '@/constants/chat';
 import { IAttachment } from '@/hooks/use-send-message';
 
@@ -56,6 +57,7 @@ export interface Variable {
   temperature?: number;
   top_p?: number;
   thinking?: 'default' | 'enabled' | 'disabled';
+  reasoning_effort?: ReasoningEffort;
   tenant_llm_id?: string;
   model_type?: string;
 }
