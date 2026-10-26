@@ -1,4 +1,4 @@
-# base stage
+﻿# base stage
 FROM ubuntu:24.04 AS base
 USER root
 SHELL ["/bin/bash", "-c"]
@@ -192,14 +192,33 @@ RUN --mount=type=cache,id=ragflow_apt,target=/var/cache/apt,sharing=locked \
 
 
 # Add dependencies of selenium
-RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/chrome-linux64-121-0-6167-85,target=/chrome-linux64.zip \
-    unzip /chrome-linux64.zip && \
-    mv chrome-linux64 /opt/chrome && \
-    ln -s /opt/chrome/chrome /usr/local/bin/
-RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/chromedriver-linux64-121-0-6167-85,target=/chromedriver-linux64.zip \
-    unzip -j /chromedriver-linux64.zip chromedriver-linux64/chromedriver && \
-    mv chromedriver /usr/local/bin/ && \
-    rm -f /usr/bin/google-chrome
+ARG CHROME_VERSION=121.0.6167.85
+RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/,target=/deps \
+    set -eu; \
+    archive_dir="$(mktemp -d)"; \
+    archive_version="${CHROME_VERSION//./-}"; \
+    for binary in chrome chromedriver; do \
+        archive="${binary}-linux64-${archive_version}"; \
+        if [ -f "/deps/${archive}" ]; then \
+            cp "/deps/${archive}" "${archive_dir}/${binary}.zip"; \
+        else \
+            if [ "$NEED_MIRROR" = "1" ]; then \
+                download_base="https://registry.npmmirror.com/-/binary/chrome-for-testing"; \
+            else \
+                download_base="https://storage.googleapis.com/chrome-for-testing-public"; \
+            fi; \
+            curl --fail --location --retry 3 \
+                "${download_base}/${CHROME_VERSION}/linux64/${binary}-linux64.zip" \
+                --output "${archive_dir}/${binary}.zip"; \
+        fi; \
+    done; \
+    unzip -q "${archive_dir}/chrome.zip" -d /opt; \
+    mv /opt/chrome-linux64 /opt/chrome; \
+    ln -s /opt/chrome/chrome /usr/local/bin/chrome; \
+    unzip -q -j "${archive_dir}/chromedriver.zip" chromedriver-linux64/chromedriver -d /usr/local/bin; \
+    chmod +x /usr/local/bin/chromedriver; \
+    rm -f /usr/bin/google-chrome; \
+    rm -rf "${archive_dir}"
 
 RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/,target=/deps \
     if [ "$(uname -m)" = "x86_64" ]; then \
