@@ -1,4 +1,4 @@
-# Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
+﻿# Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -103,7 +103,7 @@ async def test_mws_continues_tool_loop_after_repairing_arguments(stream):
         yield item
 
     responses = [response(None, [tool_call]), response("Done", None)]
-    create = AsyncMock(side_effect=[chunks(item) for item in responses] if stream else responses)
+    create = AsyncMock(side_effect=[chunks(item) for item in responses])
     chat.async_client.chat.completions.create = create
 
     if stream:
@@ -117,6 +117,8 @@ async def test_mws_continues_tool_loop_after_repairing_arguments(stream):
 
     tool.assert_awaited_once_with("lookup", {"query": "x"})
     assert create.await_count == 2
+    assert all(call.kwargs["stream"] is True for call in create.await_args_list)
+    assert chat.last_usage == {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}
     messages = create.await_args_list[1].kwargs["messages"]
     calls = json.loads(messages[1]["content"].removeprefix("<tool_calls>").removesuffix("</tool_calls>"))
     assert json.loads(calls[0]["function"]["arguments"]) == {"query": "x"}

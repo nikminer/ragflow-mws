@@ -146,16 +146,28 @@ async def test_stream_does_not_silently_accept_errors(monkeypatch, events, messa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
-async def test_nonstreaming_reasoning_is_preserved(field):
-    model = MWSChat("token", "gpt-oss-120b", PROJECT_URL)
-    model._post_json = AsyncMock(
-        return_value={
-            "choices": [{"message": {"content": "Answer", field: "Thought"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
-        }
+@pytest.mark.parametrize("with_reasoning", [False, True])
+async def test_buffered_chat_collects_streamed_json_and_reasoning(monkeypatch, field, with_reasoning):
+    session = _mock_stream(
+        monkeypatch,
+        [
+            _chunk({field: "Проверяю контекст"}),
+            _chunk({"content": '{"semantic_context":'}),
+            _chunk({"content": '"Артикул JetMarker"}'}, finish_reason="stop"),
+            {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18}},
+        ],
     )
-    assert await model._async_chat([{"role": "user", "content": "Hi"}], {}) == ("<think>Thought</think>Answer", 3)
-    assert await model._async_chat([{"role": "user", "content": "Hi"}], {}, with_reasoning=False) == ("Answer", 3)
+    model = MWSChat("token", "gpt-oss-120b", PROJECT_URL)
+    answer, tokens = await model.async_chat("Return JSON", [{"role": "user", "content": "Hi"}], {"reasoning_effort": "medium"}, with_reasoning=with_reasoning)
+    expected = '{"semantic_context":"Артикул JetMarker"}'
+    assert answer == ("<think>Проверяю контекст</think>" + expected if with_reasoning else expected)
+    assert tokens == 18
+    assert model.last_usage == {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18}
+    body = session.post.call_args.kwargs["json"]
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
+    assert body["reasoning_effort"] == "medium"
+    assert body["messages"][0] == {"role": "system", "content": "Return JSON"}
 
 
 @pytest.mark.asyncio
@@ -171,7 +183,7 @@ async def test_bound_tools_keep_mws_controls_without_other_provider_extras(strea
     async def chunks():
         yield response
 
-    create = AsyncMock(return_value=chunks() if stream else response)
+    create = AsyncMock(return_value=chunks())
     model.async_client.chat.completions.create = create
     config = {"reasoning_effort": "medium", "max_tokens": 128}
     if stream:
@@ -183,7 +195,8 @@ async def test_bound_tools_keep_mws_controls_without_other_provider_extras(strea
     assert request["max_completion_tokens"] == 128
     assert "extra_body" not in request
     assert "enable_thinking" not in request
-    assert (request.get("stream_options") == {"include_usage": True}) is stream
+    assert request["stream"] is True
+    assert request["stream_options"] == {"include_usage": True}
 
 
 @pytest.mark.asyncio
@@ -220,7 +233,8 @@ def _mock_unclosed_stream(monkeypatch, events):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reported_usage", [False, True])
-async def test_terminal_stream_does_not_wait_for_provider_to_close(monkeypatch, reported_usage):
+@pytest.mark.parametrize("buffered", [False, True])
+async def test_terminal_stream_does_not_wait_for_provider_to_close(monkeypatch, reported_usage, buffered):
     monkeypatch.setattr(chat_model, "_MWS_STREAM_USAGE_GRACE_SECONDS", 0.02, raising=False)
     events = [_chunk({"reasoning": "Plan", "content": "Answer"}, finish_reason="stop")]
     if reported_usage:
@@ -229,10 +243,13 @@ async def test_terminal_stream_does_not_wait_for_provider_to_close(monkeypatch, 
     model = MWSChat("token", "custom-deployment", PROJECT_URL)
 
     async def collect():
+        if buffered:
+            answer, tokens = await model._async_chat([{"role": "user", "content": "Hi"}], {})
+            return [(answer, tokens)]
         return [item async for item in model._async_chat_streamly([{"role": "user", "content": "Hi"}], {})]
 
     output = await asyncio.wait_for(collect(), timeout=0.5)
-    assert [text for text, _ in output if text] == ["<think>", "Plan", "</think>", "Answer"]
+    assert "".join(text for text, _ in output) == "<think>Plan</think>Answer"
     assert state["closed"]
     if reported_usage:
         assert output[-1][1] == 18
@@ -256,7 +273,8 @@ async def test_unfinished_stream_has_a_deadline_without_component_timeout_flag(m
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("max_rounds", [0, 1])
-async def test_tools_stream_closes_and_preserves_reasoning_including_final_fallback(monkeypatch, max_rounds):
+@pytest.mark.parametrize("buffered", [False, True])
+async def test_tools_stream_closes_and_preserves_reasoning_including_final_fallback(monkeypatch, max_rounds, buffered):
     state = {"closed": False}
 
     async def chunks():
@@ -278,11 +296,12 @@ async def test_tools_stream_closes_and_preserves_reasoning_including_final_fallb
     model.async_client.chat.completions.create = AsyncMock(return_value=Stream())
 
     async def collect():
-        return [item async for item in model.async_chat_streamly_with_tools("", [{"role": "user", "content": "Hi"}], {})]
+        if buffered:
+            return await model.async_chat_with_tools("", [{"role": "user", "content": "Hi"}], {})
+        output = [item async for item in model.async_chat_streamly_with_tools("", [{"role": "user", "content": "Hi"}], {})]
+        return "".join(item for item in output if isinstance(item, str)), output[-1]
 
-    output = await asyncio.wait_for(collect(), timeout=0.5)
-    assert [item for item in output if isinstance(item, str) and item] == ["<think>", "Plan", "</think>", "Answer"]
-    assert output[-1] == 18
+    assert await asyncio.wait_for(collect(), timeout=0.5) == ("<think>Plan</think>Answer", 18)
     assert state["closed"]
 
 
@@ -364,7 +383,8 @@ async def test_tools_request_deadline_includes_waiting_for_first_response(monkey
 
 
 @pytest.mark.asyncio
-async def test_cancelled_tools_stream_is_closed():
+@pytest.mark.parametrize("buffered", [False, True])
+async def test_cancelled_tools_stream_is_closed(buffered):
     entered = asyncio.Event()
     closed = asyncio.Event()
 
@@ -384,6 +404,8 @@ async def test_cancelled_tools_stream_is_closed():
     model.async_client.chat.completions.create = AsyncMock(return_value=Stream())
 
     async def collect():
+        if buffered:
+            return await model.async_chat_with_tools("", [{"role": "user", "content": "Hi"}], {})
         return [item async for item in model.async_chat_streamly_with_tools("", [{"role": "user", "content": "Hi"}], {})]
 
     task = asyncio.create_task(collect())
@@ -392,3 +414,45 @@ async def test_cancelled_tools_stream_is_closed():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_buffered_tools_collect_fragmented_arguments_and_final_json():
+    from openai.types.chat import ChatCompletionChunk
+
+    model = MWSChat("token", "custom-deployment", PROJECT_URL)
+    model.tools = [{"type": "function", "function": {"name": "lookup", "parameters": {}}}]
+    model.max_retries = 0
+    model.max_rounds = 0
+    tool = AsyncMock(return_value="Found")
+    model.toolcall_session = SimpleNamespace(tool_call_async=tool)
+
+    def chunk(delta, finish_reason=None, usage=None):
+        return ChatCompletionChunk(
+            id="test",
+            created=0,
+            model=model.model_name,
+            object="chat.completion.chunk",
+            choices=[{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+            usage=usage,
+        )
+
+    async def tool_round():
+        yield chunk({"tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"query":'}}]})
+        yield chunk({"tool_calls": [{"index": 0, "function": {"arguments": '"JetMarker"}'}}]}, "tool_calls", {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
+
+    async def final_round():
+        yield chunk({"reasoning_content": "Plan"})
+        yield chunk({"content": '{"product":'})
+        yield chunk({"content": '"JetMarker"}'}, "stop", {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6})
+
+    create = AsyncMock(side_effect=[tool_round(), final_round()])
+    model.async_client.chat.completions.create = create
+    answer, tokens = await model.async_chat_with_tools("Return JSON", [{"role": "user", "content": "Find"}], {"reasoning_effort": "medium"})
+
+    tool.assert_awaited_once_with("lookup", {"query": "JetMarker"})
+    assert answer.endswith('<think>Plan</think>{"product":"JetMarker"}')
+    assert tokens == 9
+    assert model.last_usage == {"prompt_tokens": 6, "completion_tokens": 3, "total_tokens": 9}
+    assert create.await_count == 2
+    assert all(call.kwargs["stream"] is True for call in create.await_args_list)

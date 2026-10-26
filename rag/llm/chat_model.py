@@ -82,6 +82,7 @@ async def _iter_mws_stream(stream, *, model_name, timeout_seconds, decode=None):
     terminal_deadline = None
     finish_reason = None
     finished = False
+    event_count = 0
     iterator = stream.__aiter__()
     try:
         while True:
@@ -106,6 +107,9 @@ async def _iter_mws_stream(stream, *, model_name, timeout_seconds, decode=None):
             if event == "[DONE]":
                 finished = True
                 return
+            event_count += 1
+            if event_count == 1:
+                logger.info("MWS stream first event model=%s elapsed=%.3fs", model_name, loop.time() - started)
             choices = event.get("choices") if isinstance(event, dict) else getattr(event, "choices", None)
             usage = event.get("usage") if isinstance(event, dict) else getattr(event, "usage", None)
             if choices:
@@ -125,7 +129,7 @@ async def _iter_mws_stream(stream, *, model_name, timeout_seconds, decode=None):
                     await close()
             except TimeoutError:
                 logger.warning("MWS stream close timed out model=%s", model_name)
-        logger.info("MWS stream closed model=%s finished=%s finish_reason=%s elapsed=%.3fs", model_name, finished, finish_reason, loop.time() - started)
+        logger.info("MWS stream closed model=%s finished=%s finish_reason=%s events=%s elapsed=%.3fs", model_name, finished, finish_reason, event_count, loop.time() - started)
 
 
 # Generation parameters that are safe to forward to the underlying completion
@@ -1558,43 +1562,32 @@ class MWSChat(Base):
     def _tool_request_messages(self, history: list) -> list:
         return self._request_body(history, {}, stream=False)["messages"]
 
-    async def _post_json(self, body):
-        """Send a non-streaming MWS chat request and decode its JSON response."""
-        timeout = aiohttp.ClientTimeout(total=float(os.environ.get("LLM_TIMEOUT_SECONDS", "600")))
-        logger.info("MWS request started model=%s stream=False", self.model_name)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                self.chat_url,
-                headers=self.headers,
-                json=body,
-            ) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"MWS chat request failed with status {response.status}: {await response.text()}")
-                return await response.json()
-
     async def _async_chat(self, history, gen_conf, **kwargs):
-        """Return one complete MWS chat answer together with its token usage."""
-        payload = await self._post_json(self._request_body(history, gen_conf, stream=False))
-        self.last_usage = usage_from_response(payload)
-        choices = payload.get("choices") if isinstance(payload, dict) else None
-        if not isinstance(choices, list) or not choices:
-            raise ValueError("MWS chat response does not contain choices")
-        choice = choices[0]
-        message = choice.get("message") if isinstance(choice, dict) else None
-        content = message.get("content") if isinstance(message, dict) else None
-        reasoning = (message.get("reasoning_content") or message.get("reasoning")) if isinstance(message, dict) else None
-        if not isinstance(content, str) and not isinstance(reasoning, str):
-            raise ValueError("MWS chat response does not contain message content")
-        answer = (content or "").strip()
-        if kwargs.get("with_reasoning", True) and isinstance(reasoning, str) and reasoning:
-            answer = f"<think>{reasoning}</think>{answer}"
-        if choice.get("finish_reason") == "length":
-            answer = self._length_stop(answer)
-        return answer, total_token_count_from_response(payload)
+        """Collect the MWS stream before returning a complete workflow value."""
+        answer = []
+        tokens = 0
+        async with aclosing(self._async_chat_streamly(history, gen_conf, **kwargs)) as stream:
+            async for text, used_tokens in stream:
+                answer.append(text)
+                tokens += used_tokens
+        return "".join(answer), tokens
+
+    async def async_chat_with_tools(self, system, history, gen_conf=None):
+        """Use streamed tool rounds even when the workflow needs a complete answer."""
+        answer = []
+        tokens = 0
+        async with aclosing(self.async_chat_streamly_with_tools(system, history, gen_conf)) as stream:
+            async for item in stream:
+                if isinstance(item, int):
+                    tokens = item
+                else:
+                    answer.append(item)
+        return "".join(answer), tokens
 
     async def _async_chat_streamly(self, history, gen_conf, **kwargs):
         """Stream reasoning and answer deltas, then report final token usage."""
         body = self._request_body(history, gen_conf, stream=True)
+        self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         timeout_seconds = float(os.environ.get("LLM_TIMEOUT_SECONDS", "600"))
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         estimated_tokens = 0
@@ -1663,6 +1656,8 @@ class MWSChat(Base):
 
         if in_reasoning:
             yield "</think>", 0
+        if reported_tokens is None:
+            self.last_usage["total_tokens"] = estimated_tokens
         yield "", reported_tokens if reported_tokens is not None else estimated_tokens
 
 

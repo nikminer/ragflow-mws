@@ -1,4 +1,4 @@
-#
+﻿#
 #  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
@@ -228,26 +228,16 @@ async def test_mws_model_discovery_logs_request_exception_without_credentials():
 @pytest.mark.p1
 @pytest.mark.asyncio
 async def test_mws_chat_uses_exact_url_bearer_header_and_documented_fields():
-    """Send only documented fields in a non-streaming MWS chat request."""
+    """Collect a streamed MWS answer with the documented URL, headers and fields."""
     chat = MWSChat("token", "qwen3-32b", PROJECT_URL + "/")
     response = MagicMock(status=200)
-    response.json = AsyncMock(
-        return_value={
-            "id": "chat-1",
-            "model": "qwen3-32b",
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "Hello"},
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 4,
-                "completion_tokens": 1,
-                "total_tokens": 5,
-            },
-        }
+    response.content = MagicMock()
+    response.content.close = AsyncMock()
+    response.content.__aiter__.return_value = iter(
+        [
+            b'data: {"choices":[{"delta":{"content":"Hel"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}\n',
+        ]
     )
     session = MagicMock()
     session.post.return_value = _async_context(response)
@@ -288,6 +278,8 @@ async def test_mws_chat_uses_exact_url_bearer_header_and_documented_fields():
         },
         json={
             "model": "qwen3-32b",
+            "stream": True,
+            "stream_options": {"include_usage": True},
             "messages": [
                 {"role": "system", "content": "Be concise."},
                 {"role": "user", "content": "Hi"},
@@ -361,10 +353,14 @@ async def test_mws_bound_tool_request_normalizes_existing_tool_history():
     tool_calls = [{"id": "call_123", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]
     message = SimpleNamespace(content="Done", tool_calls=None, reasoning_content=None)
     response = SimpleNamespace(
-        choices=[SimpleNamespace(message=message, finish_reason="stop")],
+        choices=[SimpleNamespace(delta=message, finish_reason="stop")],
         usage=SimpleNamespace(prompt_tokens=3, completion_tokens=1, total_tokens=4),
     )
-    chat.async_client.chat.completions.create = AsyncMock(return_value=response)
+
+    async def chunks():
+        yield response
+
+    chat.async_client.chat.completions.create = AsyncMock(return_value=chunks())
 
     answer, token_count = await chat.async_chat_with_tools(
         "",
@@ -557,6 +553,7 @@ async def test_mws_chat_streaming_uses_documented_fields_and_usage():
     chat = MWSChat("token", "qwen3-32b", PROJECT_URL)
     response = MagicMock(status=200)
     response.content = MagicMock()
+    response.content.close = AsyncMock()
     response.content.__aiter__.return_value = iter(
         [
             b'data: {"model":"qwen3-32b","choices":[{"index":0,"delta":{"content":"Hel"}}]}\n',
