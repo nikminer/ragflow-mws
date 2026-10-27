@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Chat completion SSE streaming.
  *
  * NOTE on the network layering convention (see web/AGENTS.md): this file
@@ -56,7 +56,6 @@ export function requestChatCompletionStream(
     presence_penalty,
     max_tokens,
     thinking,
-    reasoning_effort,
   } = llmSetting ?? {};
   const requestThinking = normalizeThinkingForRequest(thinking);
 
@@ -78,7 +77,6 @@ export function requestChatCompletionStream(
       ...(frequency_penalty === undefined ? {} : { frequency_penalty }),
       ...(presence_penalty === undefined ? {} : { presence_penalty }),
       ...(max_tokens === undefined ? {} : { max_tokens }),
-      ...(reasoning_effort === undefined ? {} : { reasoning_effort }),
       ...(requestThinking === undefined ? {} : { thinking: requestThinking }),
     }),
     signal,

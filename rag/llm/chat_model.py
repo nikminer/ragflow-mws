@@ -22,7 +22,6 @@ import re
 import time
 from abc import ABC
 from copy import deepcopy
-from contextlib import aclosing
 from urllib.parse import urljoin
 
 import aiohttp
@@ -70,66 +69,6 @@ class ReActMode(StrEnum):
 ERROR_PREFIX = "**ERROR**"
 LENGTH_NOTIFICATION_CN = "······\n由于大模型的上下文窗口大小限制，回答已经被大模型截断。"
 LENGTH_NOTIFICATION_EN = "...\nThe answer is truncated by your chosen LLM due to its limitation on context length."
-
-_MWS_STREAM_USAGE_GRACE_SECONDS = 1.0
-
-
-async def _iter_mws_stream(stream, *, model_name, timeout_seconds, decode=None):
-    """Bound a completion stream, allowing a short usage trailer after its terminal choice."""
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    deadline = started + timeout_seconds
-    terminal_deadline = None
-    finish_reason = None
-    finished = False
-    event_count = 0
-    iterator = stream.__aiter__()
-    try:
-        while True:
-            read_deadline = min(deadline, terminal_deadline) if terminal_deadline is not None else deadline
-            try:
-                if loop.time() >= read_deadline:
-                    raise TimeoutError
-                async with asyncio.timeout_at(read_deadline):
-                    item = await anext(iterator)
-            except StopAsyncIteration:
-                if not finished:
-                    raise RuntimeError("MWS chat stream ended before [DONE] or finish_reason")
-                return
-            except TimeoutError:
-                if finished:
-                    return
-                raise TimeoutError(f"MWS chat stream timed out after {timeout_seconds:g} seconds") from None
-
-            event = decode(item) if decode is not None else item
-            if event is None:
-                continue
-            if event == "[DONE]":
-                finished = True
-                return
-            event_count += 1
-            if event_count == 1:
-                logger.info("MWS stream first event model=%s elapsed=%.3fs", model_name, loop.time() - started)
-            choices = event.get("choices") if isinstance(event, dict) else getattr(event, "choices", None)
-            usage = event.get("usage") if isinstance(event, dict) else getattr(event, "usage", None)
-            if choices:
-                choice = choices[0]
-                finish_reason = (choice.get("finish_reason") if isinstance(choice, dict) else getattr(choice, "finish_reason", None)) or finish_reason
-                if finish_reason and not finished:
-                    finished = True
-                    terminal_deadline = loop.time() + _MWS_STREAM_USAGE_GRACE_SECONDS
-            yield event
-            if finished and usage is not None:
-                return
-    finally:
-        close = getattr(stream, "close", None) or getattr(iterator, "aclose", None)
-        if close is not None:
-            try:
-                async with asyncio.timeout(1):
-                    await close()
-            except TimeoutError:
-                logger.warning("MWS stream close timed out model=%s", model_name)
-        logger.info("MWS stream closed model=%s finished=%s finish_reason=%s events=%s elapsed=%.3fs", model_name, finished, finish_reason, event_count, loop.time() - started)
 
 
 # Generation parameters that are safe to forward to the underlying completion
@@ -434,13 +373,6 @@ class Base(ABC):
     def _get_delay(self):
         return self.base_delay * random.uniform(10, 150)
 
-    async def _create_tool_completion(self, **kwargs):
-        return await self.async_client.chat.completions.create(**kwargs)
-
-    async def _iter_tool_stream(self, response):
-        async for event in response:
-            yield event
-
     def _classify_error(self, error):
         error_str = str(error).lower()
 
@@ -711,14 +643,6 @@ class Base(ABC):
     def _tool_request_messages(self, history: list) -> list:
         return history
 
-    def _prepare_tool_request(self, gen_conf, *, stream=False):
-        return _apply_model_family_policies(
-            self.model_name,
-            backend="base",
-            gen_conf=gen_conf,
-            request_kwargs={},
-        )
-
     async def async_chat_with_tools(self, system: str, history: list, gen_conf: dict | None = None):
         gen_conf = dict(gen_conf or {})
         gen_conf.pop("tools", None)
@@ -727,7 +651,12 @@ class Base(ABC):
             return await self.async_chat(system, history, gen_conf)
 
         gen_conf = self._clean_conf(gen_conf)
-        gen_conf, extra_request_kwargs = self._prepare_tool_request(gen_conf)
+        gen_conf, extra_request_kwargs = _apply_model_family_policies(
+            self.model_name,
+            backend="base",
+            gen_conf=gen_conf,
+            request_kwargs={},
+        )
         if system and history and history[0].get("role") != "system":
             history.insert(0, {"role": "system", "content": system})
 
@@ -751,7 +680,7 @@ class Base(ABC):
             try:
                 for _ in range(self.max_rounds + 1):
                     logging.info(f"{self.tools=}")
-                    response = await self._create_tool_completion(
+                    response = await self.async_client.chat.completions.create(
                         model=self.model_name,
                         messages=self._tool_request_messages(history),
                         **self._tool_request_kwargs(),
@@ -840,7 +769,6 @@ class Base(ABC):
 
     async def async_chat_streamly_with_tools(self, system: str, history: list, gen_conf: dict | None = None):
         gen_conf = dict(gen_conf or {})
-        reasoning_start = False
         gen_conf.pop("tools", None)
         gen_conf.pop("tool_choice", None)
         if not self.tools:
@@ -849,7 +777,12 @@ class Base(ABC):
             return
 
         gen_conf = self._clean_conf(gen_conf)
-        gen_conf, extra_request_kwargs = self._prepare_tool_request(gen_conf, stream=True)
+        gen_conf, extra_request_kwargs = _apply_model_family_policies(
+            self.model_name,
+            backend="base",
+            gen_conf=gen_conf,
+            request_kwargs={},
+        )
         gen_conf.pop("tools", None)
         gen_conf.pop("tool_choice", None)
         tools = self.tools
@@ -881,7 +814,7 @@ class Base(ABC):
                     reasoning_start = False
                     logging.info(f"[Tool loop] Deciding what to do next (step {_round + 1}); available tools: {', '.join(t['function']['name'] for t in tools)}")
 
-                    response = await self._create_tool_completion(
+                    response = await self.async_client.chat.completions.create(
                         model=self.model_name,
                         messages=self._tool_request_messages(history),
                         stream=True,
@@ -896,57 +829,58 @@ class Base(ABC):
                     round_estimate = 0
                     round_usage = None
 
-                    async with aclosing(self._iter_tool_stream(response)) as stream_events:
-                        async for resp in stream_events:
-                            _u = usage_from_response(resp)
-                            if _u["total_tokens"]:
-                                round_usage = _u
+                    async for resp in response:
+                        _u = usage_from_response(resp)
+                        if _u["total_tokens"]:
+                            round_usage = _u
 
-                            if not hasattr(resp, "choices") or not resp.choices:
-                                continue
+                        if not hasattr(resp, "choices") or not resp.choices:
+                            continue
 
-                            delta = resp.choices[0].delta
+                        delta = resp.choices[0].delta
 
-                            if hasattr(delta, "tool_calls") and delta.tool_calls:
-                                for tool_call in delta.tool_calls:
-                                    index = tool_call.index
-                                    if index not in final_tool_calls:
-                                        if not tool_call.function.arguments:
-                                            tool_call.function.arguments = ""
-                                        final_tool_calls[index] = tool_call
-                                    else:
-                                        final_tool_calls[index].function.arguments += tool_call.function.arguments or ""
-                            if not hasattr(delta, "content") or delta.content is None:
-                                delta.content = ""
+                        if hasattr(delta, "tool_calls") and delta.tool_calls:
+                            for tool_call in delta.tool_calls:
+                                index = tool_call.index
+                                if index not in final_tool_calls:
+                                    if not tool_call.function.arguments:
+                                        tool_call.function.arguments = ""
+                                    final_tool_calls[index] = tool_call
+                                else:
+                                    final_tool_calls[index].function.arguments += tool_call.function.arguments or ""
+                            continue
 
-                            _reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-                            if _reasoning:
-                                generated_text += _reasoning
-                                if not reasoning_start:
-                                    reasoning_start = True
-                                    yield "<think>"
-                                yield _reasoning
-                                if delta.content:
-                                    reasoning_start = False
-                                    yield "</think>"
-                                    answer += delta.content
-                                    yield delta.content
-                            else:
-                                if reasoning_start and delta.content:
-                                    reasoning_start = False
-                                    yield "</think>"
+                        if not hasattr(delta, "content") or delta.content is None:
+                            delta.content = ""
+
+                        _reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                        if _reasoning:
+                            generated_text += _reasoning
+                            if not reasoning_start:
+                                reasoning_start = True
+                                yield "<think>"
+                            yield _reasoning
+                            if delta.content:
+                                reasoning_start = False
+                                yield "</think>"
                                 answer += delta.content
                                 yield delta.content
+                        else:
+                            if reasoning_start and delta.content:
+                                reasoning_start = False
+                                yield "</think>"
+                            answer += delta.content
+                            yield delta.content
 
-                            if not _u["total_tokens"]:
-                                round_estimate += num_tokens_from_string(delta.content)
+                        if not _u["total_tokens"]:
+                            round_estimate += num_tokens_from_string(delta.content)
 
-                            finish_reason = getattr(resp.choices[0], "finish_reason", "")
-                            if finish_reason == "length":
-                                if reasoning_start:
-                                    reasoning_start = False
-                                    yield "</think>"
-                                yield LENGTH_NOTIFICATION_CN if is_chinese(answer or generated_text) else LENGTH_NOTIFICATION_EN
+                        finish_reason = getattr(resp.choices[0], "finish_reason", "")
+                        if finish_reason == "length":
+                            if reasoning_start:
+                                reasoning_start = False
+                                yield "</think>"
+                            yield LENGTH_NOTIFICATION_CN if is_chinese(answer or generated_text) else LENGTH_NOTIFICATION_EN
 
                     if reasoning_start:
                         yield "</think>"
@@ -1007,7 +941,7 @@ class Base(ABC):
                 logging.warning(f"Exceed max rounds: {self.max_rounds}")
                 history.append({"role": "user", "content": f"Exceed max rounds: {self.max_rounds}"})
 
-                response = await self._create_tool_completion(
+                response = await self.async_client.chat.completions.create(
                     model=self.model_name,
                     messages=self._tool_request_messages(history),
                     stream=True,
@@ -1018,48 +952,24 @@ class Base(ABC):
 
                 fb_estimate = 0
                 fb_usage = None
-                reasoning_start = False
-                fb_answer = ""
-                async with aclosing(self._iter_tool_stream(response)) as stream_events:
-                    async for resp in stream_events:
-                        _u = usage_from_response(resp)
-                        if _u["total_tokens"]:
-                            fb_usage = _u
-                        if not hasattr(resp, "choices") or not resp.choices:
-                            continue
-                        delta = resp.choices[0].delta
-                        content = getattr(delta, "content", None) or ""
-                        reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-                        if reasoning:
-                            if not reasoning_start:
-                                reasoning_start = True
-                                yield "<think>"
-                            yield reasoning
-                        if content:
-                            if reasoning_start:
-                                reasoning_start = False
-                                yield "</think>"
-                            fb_answer += content
-                            yield content
-                        if not _u["total_tokens"]:
-                            fb_estimate += num_tokens_from_string(content) + num_tokens_from_string(reasoning or "")
-                        if getattr(resp.choices[0], "finish_reason", None) == "length":
-                            if reasoning_start:
-                                reasoning_start = False
-                                yield "</think>"
-                            yield LENGTH_NOTIFICATION_CN if is_chinese(fb_answer or reasoning or "") else LENGTH_NOTIFICATION_EN
-
-                if reasoning_start:
-                    yield "</think>"
+                async for resp in response:
+                    _u = usage_from_response(resp)
+                    if _u["total_tokens"]:
+                        fb_usage = _u
+                    if not hasattr(resp, "choices") or not resp.choices:
+                        continue
+                    delta = resp.choices[0].delta
+                    if not hasattr(delta, "content") or delta.content is None:
+                        continue
+                    if not _u["total_tokens"]:
+                        fb_estimate += num_tokens_from_string(delta.content)
+                    yield delta.content
 
                 _commit_round(fb_usage, fb_estimate)
                 yield total_tokens
                 return
 
             except Exception as e:
-                if reasoning_start:
-                    reasoning_start = False
-                    yield "</think>"
                 e = await self._exceptions_async(e, attempt)
                 if e:
                     logging.error(f"async_chat_streamly failed: {e}")
@@ -1454,33 +1364,7 @@ class MWSChat(Base):
             max_tokens = gen_conf.get("max_tokens")
         if max_tokens is not None:
             cleaned["max_completion_tokens"] = max_tokens
-        effort = gen_conf.get("reasoning_effort")
-        if effort is not None and effort != "default":
-            if not isinstance(effort, str) or effort not in {"none", "minimal", "low", "medium", "high", "max"}:
-                raise ValueError("Invalid MWS reasoning_effort; expected none, minimal, low, medium, high, or max")
-            cleaned["reasoning_effort"] = effort
         return cleaned
-
-    def _prepare_tool_request(self, gen_conf, *, stream=False):
-        # MWS defines its own controls; deployment names must not trigger
-        # transport policies for another provider (for example Qwen extras).
-        extra = {"stream_options": {"include_usage": True}} if stream else {}
-        return self._clean_conf(gen_conf), extra
-
-    async def _create_tool_completion(self, **kwargs):
-        timeout = float(os.environ.get("LLM_TIMEOUT_SECONDS", "600"))
-        started = time.monotonic()
-        logger.info("MWS request started model=%s stream=%s tools=%s", self.model_name, kwargs.get("stream", False), len(kwargs.get("tools") or []))
-        try:
-            async with asyncio.timeout(timeout):
-                response = await super()._create_tool_completion(**kwargs)
-            logger.info("MWS response received model=%s stream=%s elapsed=%.3fs", self.model_name, kwargs.get("stream", False), time.monotonic() - started)
-            return response
-        except TimeoutError:
-            raise TimeoutError(f"MWS chat request timed out after {timeout:g} seconds") from None
-
-    def _iter_tool_stream(self, response):
-        return _iter_mws_stream(response, model_name=self.model_name, timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", "600")))
 
     def _request_body(self, history, gen_conf, *, stream):
         """Build an MWS request and flatten unsupported tool-history messages."""
@@ -1562,103 +1446,82 @@ class MWSChat(Base):
     def _tool_request_messages(self, history: list) -> list:
         return self._request_body(history, {}, stream=False)["messages"]
 
-    async def _async_chat(self, history, gen_conf, **kwargs):
-        """Collect the MWS stream before returning a complete workflow value."""
-        answer = []
-        tokens = 0
-        async with aclosing(self._async_chat_streamly(history, gen_conf, **kwargs)) as stream:
-            async for text, used_tokens in stream:
-                answer.append(text)
-                tokens += used_tokens
-        return "".join(answer), tokens
+    async def _post_json(self, body):
+        """Send a non-streaming MWS chat request and decode its JSON response."""
+        timeout = aiohttp.ClientTimeout(total=int(os.environ.get("LLM_TIMEOUT_SECONDS", 600)))
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                self.chat_url,
+                headers=self.headers,
+                json=body,
+            ) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"MWS chat request failed with status {response.status}: {await response.text()}")
+                return await response.json()
 
-    async def async_chat_with_tools(self, system, history, gen_conf=None):
-        """Use streamed tool rounds even when the workflow needs a complete answer."""
-        answer = []
-        tokens = 0
-        async with aclosing(self.async_chat_streamly_with_tools(system, history, gen_conf)) as stream:
-            async for item in stream:
-                if isinstance(item, int):
-                    tokens = item
-                else:
-                    answer.append(item)
-        return "".join(answer), tokens
+    async def _async_chat(self, history, gen_conf, **kwargs):
+        """Return one complete MWS chat answer together with its token usage."""
+        payload = await self._post_json(self._request_body(history, gen_conf, stream=False))
+        self.last_usage = usage_from_response(payload)
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("MWS chat response does not contain choices")
+        choice = choices[0]
+        message = choice.get("message") if isinstance(choice, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str):
+            raise ValueError("MWS chat response does not contain message content")
+        answer = content.strip()
+        if choice.get("finish_reason") == "length":
+            answer = self._length_stop(answer)
+        return answer, total_token_count_from_response(payload)
 
     async def _async_chat_streamly(self, history, gen_conf, **kwargs):
-        """Stream reasoning and answer deltas, then report final token usage."""
+        """Yield MWS SSE content chunks and attach usage to the final chunk."""
         body = self._request_body(history, gen_conf, stream=True)
-        self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        timeout_seconds = float(os.environ.get("LLM_TIMEOUT_SECONDS", "600"))
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        timeout = aiohttp.ClientTimeout(total=int(os.environ.get("LLM_TIMEOUT_SECONDS", 600)))
+        pending_content = None
         estimated_tokens = 0
-        reported_tokens = None
-        in_reasoning = False
-        generated_text = ""
-        answer = ""
+        reported_tokens = 0
 
-        def decode_line(raw_line):
-            line = raw_line.decode("utf-8").strip()
-            if not line.startswith("data:"):
-                return None
-            data = line[5:].strip()
-            if not data:
-                return None
-            return data if data == "[DONE]" else json.loads(data)
-
-        logger.info("MWS request started model=%s stream=True", self.model_name)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self.chat_url, headers=self.headers, json=body) as response:
+            async with session.post(
+                self.chat_url,
+                headers=self.headers,
+                json=body,
+            ) as response:
                 if response.status != 200:
                     raise RuntimeError(f"MWS chat request failed with status {response.status}: {await response.text()}")
 
-                async with aclosing(_iter_mws_stream(response.content, model_name=self.model_name, timeout_seconds=timeout_seconds, decode=decode_line)) as stream_events:
-                    async for event in stream_events:
-                        if event.get("error"):
-                            if in_reasoning:
-                                in_reasoning = False
-                                yield "</think>", 0
-                            raise RuntimeError(f"MWS chat stream failed: {event['error']}")
-                        if isinstance(event.get("usage"), dict):
-                            self.last_usage = usage_from_response(event)
-                            reported_tokens = self.last_usage["total_tokens"]
-                        choices = event.get("choices")
-                        if not isinstance(choices, list) or not choices:
-                            continue
-                        choice = choices[0]
-                        if not isinstance(choice, dict):
-                            continue
-                        delta = choice.get("delta") or {}
-                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                        if isinstance(reasoning, str) and reasoning:
-                            generated_text += reasoning
-                            estimated_tokens += num_tokens_from_string(reasoning)
-                            if kwargs.get("with_reasoning", True):
-                                if not in_reasoning:
-                                    in_reasoning = True
-                                    yield "<think>", 0
-                                yield reasoning, 0
-                        content = delta.get("content")
-                        if isinstance(content, str) and content:
-                            if in_reasoning:
-                                in_reasoning = False
-                                yield "</think>", 0
-                            answer += content
-                            generated_text += content
-                            estimated_tokens += num_tokens_from_string(content)
-                            yield content, 0
-                        finish_reason = choice.get("finish_reason")
-                        if finish_reason:
-                            if in_reasoning:
-                                in_reasoning = False
-                                yield "</think>", 0
-                            if finish_reason == "length":
-                                yield LENGTH_NOTIFICATION_CN if is_chinese(answer or generated_text) else LENGTH_NOTIFICATION_EN, 0
+                async for raw_line in response.content:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    event = json.loads(data)
+                    usage = usage_from_response(event)
+                    if usage["total_tokens"]:
+                        self.last_usage = usage
+                        reported_tokens = usage["total_tokens"]
 
-        if in_reasoning:
-            yield "</think>", 0
-        if reported_tokens is None:
-            self.last_usage["total_tokens"] = estimated_tokens
-        yield "", reported_tokens if reported_tokens is not None else estimated_tokens
+                    choices = event.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") if isinstance(choice, dict) else None
+                    content = delta.get("content") if isinstance(delta, dict) else None
+                    if not isinstance(content, str) or not content:
+                        continue
+                    if choice.get("finish_reason") == "length":
+                        content = self._length_stop(content)
+                    if pending_content is not None:
+                        yield pending_content, 0
+                    pending_content = content
+                    estimated_tokens += num_tokens_from_string(content)
+
+        yield pending_content or "", reported_tokens or estimated_tokens
 
 
 class Xiaomi(Base):

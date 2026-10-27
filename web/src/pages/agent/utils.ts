@@ -1,4 +1,4 @@
-import { FileType, FileTypeSuffixMap } from '@/constants/file';
+﻿import { FileType, FileTypeSuffixMap } from '@/constants/file';
 import {
   DSL,
   DSLComponents,
@@ -443,7 +443,6 @@ export const LlmSettingParamKeys = [
   'max_tokens',
   'parameter',
   'thinking',
-  'reasoning_effort',
   'temperatureEnabled',
   'topPEnabled',
   'presencePenaltyEnabled',

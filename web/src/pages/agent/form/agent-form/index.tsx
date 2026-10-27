@@ -1,10 +1,10 @@
-import { Collapse } from '@/components/collapse';
+﻿import { Collapse } from '@/components/collapse';
 import {
   LargeModelFilterFormSchema,
   LargeModelFormField,
 } from '@/components/large-model-form-field';
-import { ModelReasoningFormField } from '@/components/llm-setting-items/model-reasoning-form-field';
 import { LlmSettingSchema } from '@/components/llm-setting-items/next';
+import { SliderInputSwitchFormField } from '@/components/llm-setting-items/slider';
 import { MessageHistoryWindowSizeFormField } from '@/components/message-history-window-size-item';
 import { SelectWithSearch } from '@/components/originui/select-with-search';
 import { RAGFlowFormItem } from '@/components/ragflow-form';
@@ -180,7 +180,6 @@ function AgentForm({ node }: INextOperatorForm) {
         <FormWrapper>
           {isSubAgent && <DescriptionField></DescriptionField>}
           <LargeModelFormField ownerTenantId={ownerTenantId} />
-          <ModelReasoningFormField ownerTenantId={ownerTenantId} />
           {(mcpIds.length > 0 || hasSubAgentOrTool(edges, node?.id)) && (
             <FormField
               control={form.control}

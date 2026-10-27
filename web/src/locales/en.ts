@@ -1,4 +1,4 @@
-export default {
+﻿export default {
   translation: {
     common: {
       confirm: 'Confirm',
@@ -1059,18 +1059,6 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       createAssistant: 'Create an assistant',
       assistantSetting: 'Assistant settings',
       promptEngine: 'Prompt engine',
-      reasoningEffort: 'Reasoning effort',
-      reasoningEffortTip:
-        'Controls how much the MWS model reasons before answering. Available levels depend on the model. Default uses the provider setting.',
-      reasoningEffortOptions: {
-        default: 'Model default',
-        none: 'Off',
-        minimal: 'Minimal',
-        low: 'Low',
-        medium: 'Medium',
-        high: 'High',
-        max: 'Maximum',
-      },
       modelSetting: 'Model settings',
       chat: 'Chat',
       newChat: 'New chat',

@@ -1,4 +1,4 @@
-export default {
+﻿export default {
   translation: {
     common: {
       confirm: 'Подтвердить',
@@ -788,18 +788,6 @@ export default {
       createAssistant: 'Создать ассистента',
       assistantSetting: 'Настройки ассистента',
       promptEngine: 'Промпт-движок',
-      reasoningEffort: 'Уровень рассуждений',
-      reasoningEffortTip:
-        'Определяет глубину рассуждений модели MWS перед ответом. Доступные уровни зависят от модели. По умолчанию используется настройка провайдера.',
-      reasoningEffortOptions: {
-        default: 'По умолчанию модели',
-        none: 'Выключены',
-        minimal: 'Минимальный',
-        low: 'Низкий',
-        medium: 'Средний',
-        high: 'Высокий',
-        max: 'Максимальный',
-      },
       modelSetting: 'Настройки модели',
       chat: 'Чат',
       newChat: 'Новый чат',
